@@ -1,0 +1,58 @@
+# See https://canonical-rockcraft.readthedocs-hosted.com/en/latest/reference/extensions/fastapi-framework/
+# For questions or help, visit https://matrix.to/#/#12-factor-charms:ubuntu.com
+
+name: doc-hosting-api
+# see https://canonical-rockcraft.readthedocs-hosted.com/en/latest/explanation/bases/
+# for more information about bases and using 'bare' bases for chiselled rocks
+base: bare # as an alternative, an ubuntu base can be used
+build-base: ubuntu@24.04 # build-base is required when the base is bare
+version: '0.1' # just for humans. Semantic versioning is recommended
+summary: Documentation hosting API layer (ingestion, versions, doc serving)
+description: |
+  A 12-factor FastAPI application implementing the doc-hosting API layer:
+  an authenticated ingestion API to register documentation builds, a version
+  API listing registered versions and languages, and middleware that serves
+  the built documentation straight from an S3-compatible bucket (MinIO).
+platforms:
+  amd64:
+  # arm64:
+  # ppc64el:
+  # s390x:
+
+# the ASGI entrypoint is `app:app`, defined in app.py in the project root;
+# a requirements.txt file (generated with `uv export`, see scripts/deploy.py)
+# must exist in the base directory when packing.
+extensions:
+- fastapi-framework
+
+parts:
+  fastapi-framework/install-app:
+    prime:
+      # the ASGI entrypoint and the application package
+      - app/app.py
+      - app/doc_hosting
+  fastapi-framework/dependencies:
+    # Build fixes for the python plugin:
+    # 1. The chiselled base unpacks a usr-merge layout (lib -> usr/lib
+    #    symlink) into the part install dir. pip resolves installed data
+    #    scripts through RECORD-relative paths (e.g. ../../../bin/jp.py,
+    #    shipped by jmespath, a boto3 dependency); those traverse the symlink
+    #    and resolve to a nonexistent location, failing the whole pip
+    #    install. Drop the symlinks so the venv's lib/ is a real directory
+    #    while pip runs, then relocate the venv under usr/lib (and drop the
+    #    real lib/) to match the chiselled usr-merge layout that the runtime
+    #    part stages into the rock.
+    # 2. This repository's root pyproject.toml is a virtual uv project (no
+    #    build system); the python plugin would try to `pip install .` and
+    #    fail. The build runs in a disposable copy of the source, so remove
+    #    it there (only requirements.txt is needed to build the venv).
+    override-build: |
+      rm -f "${CRAFT_PART_INSTALL}/lib" "${CRAFT_PART_INSTALL}/lib64"
+      rm -f pyproject.toml
+      craftctl default
+      mkdir -p "${CRAFT_PART_INSTALL}/usr/lib/python3.12"
+      rm -rf "${CRAFT_PART_INSTALL}/usr/lib/python3.12/site-packages"
+      mv "${CRAFT_PART_INSTALL}/lib/python3.12/site-packages" \
+         "${CRAFT_PART_INSTALL}/usr/lib/python3.12/site-packages"
+      rm -rf "${CRAFT_PART_INSTALL}/lib"
+      rm -f "${CRAFT_PART_INSTALL}/lib64"

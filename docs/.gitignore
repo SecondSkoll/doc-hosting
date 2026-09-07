@@ -1,0 +1,9 @@
+# Sphinx and check outputs
+_build/
+_dev/warnings.txt
+_dev/.doctrees/
+_dev/node_modules/
+_dev/styles/
+_dev/vale.ini
+package*.json
+__pycache__/

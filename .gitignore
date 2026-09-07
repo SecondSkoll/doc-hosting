@@ -1,0 +1,32 @@
+# build artefacts
+*.rock
+*.charm
+
+# rockcraft/craft-parts build directories
+parts/
+stage/
+prime/
+overlay/
+bundles/
+images/
+charm/parts/
+charm/stage/
+charm/prime/
+charm/overlay/
+charm/.venv/
+charm/uv.lock
+
+# generated at build time by scripts/deploy.py build
+# (charm/requirements.txt is tracked and NOT generated)
+/requirements.txt
+
+# Python / tooling
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Sphinx build output
+docs/_build/
+
+# deployment connection details (contains credentials)
+.juju-deploy.env

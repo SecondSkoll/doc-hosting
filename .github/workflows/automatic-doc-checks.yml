@@ -1,0 +1,25 @@
+name: Automatic doc checks
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'Makefile', 'pyproject.toml', 'uv.lock']
+  pull_request:
+    paths: ['docs/**', 'Makefile', 'pyproject.toml', 'uv.lock']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  documentation-checks:
+    uses: canonical/documentation-workflows/.github/workflows/documentation-checks.yaml@main
+    with:
+      working-directory: '.'
+      python-version: '3.12'
+      fetch-depth: 0
+      install-target: docs-install
+      spelling-target: docs-spelling
+      woke-target: docs-woke
+      linkcheck-target: docs-linkcheck

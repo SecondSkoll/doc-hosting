@@ -1,0 +1,5 @@
+<div class="related-pages">
+  {% if next %}<a class="next-page" href="{{ next.link }}"><div class="page-info"><div class="context">Next</div><div class="title">{{ next.title }}</div></div></a>{% endif %}
+  {% if prev %}<a class="prev-page" href="{{ prev.link }}"><div class="page-info"><div class="context">Previous</div><div class="title">{{ prev.title }}</div></div></a>{% endif %}
+</div>
+<div class="bottom-of-page"><div class="left-details"><div class="copyright">&copy; {{ copyright }}</div>{% if last_updated %}<div class="last-updated">Last updated on {{ last_updated }}</div>{% endif %}</div></div>

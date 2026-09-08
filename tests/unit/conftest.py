@@ -10,6 +10,7 @@ permit the local fallbacks.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 
@@ -45,6 +46,7 @@ def env(monkeypatch):
     monkeypatch.delenv("S3_PATH", raising=False)
     monkeypatch.delenv("S3_REGION", raising=False)
     monkeypatch.delenv("DOC_HOSTING_REDIRECT_CACHE_TTL", raising=False)
+    monkeypatch.delenv("DOC_HOSTING_UPLOAD_URL_TTL", raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -65,6 +67,7 @@ def clean_db(django_db):
     models.AuditEvent.objects.all().delete()
     models.PathMigration.objects.all().delete()
     models.LayoutChange.objects.all().delete()
+    models.UploadSession.objects.all().delete()
     models.Publication.objects.all().delete()
     models.Redirect.objects.all().delete()
     models.Project.objects.all().delete()
@@ -137,6 +140,72 @@ def publish_as(client: TestClient, credential=TOKEN, project_secret=SECRET, **ov
     else:
         body["project_secret"] = project_secret
     return client.post("/api/v1/publish", json=body, headers=headers)
+
+
+def manifest_for(files: dict[str, bytes]) -> list[dict]:
+    """Return the manifest entries (path, sha256, size) for ``files``."""
+    return [
+        {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        for path, data in files.items()
+    ]
+
+
+def _upload_body(manifest, **overrides):
+    body = {
+        "commit_hash": "deadbeef",
+        "version": "latest",
+        "language": "en",
+        "domain": "docs.example.com",
+        "root_path": "docs",
+        "project_secret": SECRET,
+        "manifest": manifest,
+    }
+    body.update(overrides)
+    return body
+
+
+def begin_upload(
+    client: TestClient,
+    manifest=None,
+    credential=TOKEN,
+    project_secret=SECRET,
+    **overrides,
+):
+    """POST a fully authenticated direct-upload begin request."""
+    headers = {}
+    if credential is not None:
+        headers["Authorization"] = f"Bearer {credential}"
+    body = _upload_body(
+        manifest if manifest is not None else manifest_for({"index.html": b"<html>"}),
+        **overrides,
+    )
+    if project_secret is None:
+        body.pop("project_secret")
+    else:
+        body["project_secret"] = project_secret
+    return client.post("/api/v1/uploads", json=body, headers=headers)
+
+
+def finalize_upload(
+    client: TestClient,
+    upload_id,
+    manifest=None,
+    credential=TOKEN,
+    project_secret=SECRET,
+):
+    """POST a fully authenticated direct-upload finalize request."""
+    headers = {}
+    if credential is not None:
+        headers["Authorization"] = f"Bearer {credential}"
+    body = {
+        "project_secret": project_secret,
+        "manifest": manifest
+        if manifest is not None
+        else manifest_for({"index.html": b"<html>"}),
+    }
+    if project_secret is None:
+        body.pop("project_secret")
+    return client.post(f"/api/v1/uploads/{upload_id}/finalize", json=body, headers=headers)
 
 
 @pytest.fixture()

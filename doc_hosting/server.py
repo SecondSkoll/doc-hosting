@@ -10,6 +10,11 @@ Every publish requires two independent credentials: the deployment-wide
 bearer token (``Authorization: Bearer <APP_PUBLISH_TOKEN>``) as the
 deployment gate, and a non-empty ``project_secret`` in the JSON body as the
 per-root ownership proof.  Only the project secret is hashed and stored.
+Two publish flows share those gates: the register-only ``POST
+/api/v1/publish`` (for callers that uploaded content themselves) and the
+direct-upload flow ``POST /api/v1/uploads`` -> presigned exact-key PUT URLs
+-> ``POST /api/v1/uploads/{upload_id}/finalize`` (the API verifies the
+uploaded objects' checksums and atomically registers the build).
 
 Routes are registered so that the platform endpoints win: ``/health``,
 ``/api/v1/*``, the Django admin mounted at ``/manage/``, and finally one
@@ -52,6 +57,37 @@ class PublishRequest(BaseModel):
     # reports 422 for an otherwise authenticated request (and a missing
     # bearer still reports 401).
     project_secret: str | None = None
+
+
+class UploadManifestEntry(BaseModel):
+    """One declared build file: relative path, SHA-256 digest and size."""
+
+    # Strict types: a size arriving as a string or bool is a schema error,
+    # not a silently coerced value that later participates in verification.
+    model_config = {"strict": True}
+
+    path: str
+    sha256: str
+    size: int
+
+
+class UploadBeginRequest(BaseModel):
+    """Request body for beginning an API-authorised direct upload."""
+
+    commit_hash: str
+    version: str
+    language: str
+    domain: str
+    root_path: str
+    project_secret: str | None = None
+    manifest: list[UploadManifestEntry] | None = None
+
+
+class UploadFinalizeRequest(BaseModel):
+    """Request body for finalizing a direct upload with its manifest."""
+
+    project_secret: str | None = None
+    manifest: list[UploadManifestEntry] | None = None
 
 
 def _is_safe_slug(value: str) -> bool:
@@ -110,6 +146,25 @@ def _require_bearer(request: Request) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return token
+
+
+def _require_publish_token(request: Request, bearer: str) -> Settings:
+    """Pass the deployment-wide publishing gate, returning the settings."""
+    settings = _get_settings(request.app)
+    if settings.publish_token is None:
+        raise HTTPException(
+            status_code=503, detail="publish token is not configured"
+        )
+    if not secrets.compare_digest(bearer, settings.publish_token):
+        raise HTTPException(status_code=403, detail="invalid publish token")
+    return settings
+
+
+def _require_project_secret(project_secret: str | None) -> str:
+    """Return the non-empty project secret from the JSON body."""
+    if not project_secret or not project_secret.strip():
+        raise HTTPException(status_code=422, detail="project_secret must not be empty")
+    return project_secret
 
 
 def _fetch_object(storage: S3Storage, base_key: str, doc_path: str) -> Response | None:
@@ -179,20 +234,10 @@ def create_app() -> FastAPI:
         gate and never becomes project state.
         """
         bearer = _require_bearer(request)
-        settings = _get_settings(request.app)
-        if settings.publish_token is None:
-            raise HTTPException(
-                status_code=503, detail="publish token is not configured"
-            )
-        if not secrets.compare_digest(bearer, settings.publish_token):
-            raise HTTPException(status_code=403, detail="invalid publish token")
+        _require_publish_token(request, bearer)
         _validate_slug(body.language, "language")
         _validate_slug(body.version, "version")
-        project_secret = body.project_secret
-        if not project_secret or not project_secret.strip():
-            raise HTTPException(
-                status_code=422, detail="project_secret must not be empty"
-            )
+        project_secret = _require_project_secret(body.project_secret)
         try:
             return services.publish_build(
                 root_path=body.root_path,
@@ -206,6 +251,80 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=exc.status_code, detail=exc.detail
             ) from exc
+
+    @app.post("/api/v1/uploads", status_code=201)
+    def begin_upload(body: UploadBeginRequest, request: Request) -> dict[str, Any]:
+        """Begin an API-authorised direct upload.
+
+        Authenticates like the publish API (deployment bearer token plus
+        the project's shared secret, claiming the root on first use), then
+        creates a pending upload session and returns one short-lived,
+        path-restricted presigned S3 PUT URL per declared manifest file,
+        each bound to the file's SHA-256. The returned upload ID identifies
+        the publication for the finalize call.
+        """
+        bearer = _require_bearer(request)
+        settings = _require_publish_token(request, bearer)
+        _validate_slug(body.language, "language")
+        _validate_slug(body.version, "version")
+        project_secret = _require_project_secret(body.project_secret)
+        try:
+            return services.begin_upload(
+                root_path=body.root_path,
+                language=body.language,
+                version=body.version,
+                commit_hash=body.commit_hash,
+                domain=body.domain,
+                project_secret=project_secret,
+                manifest=(
+                    [entry.model_dump() for entry in body.manifest]
+                    if body.manifest is not None
+                    else None
+                ),
+                storage=_get_storage(request.app),
+                url_ttl=settings.upload_url_ttl,
+            )
+        except services.ServiceError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=exc.detail
+            ) from exc
+
+    @app.post("/api/v1/uploads/{upload_id}/finalize", status_code=201)
+    def finalize_upload(
+        upload_id: int,
+        body: UploadFinalizeRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        """Finalize a direct upload: verify the objects, register the build.
+
+        Re-authenticates the project secret, verifies every manifest
+        object's existence, size and stored SHA-256 in storage and then
+        atomically registers the publication and completes the upload
+        session. Replaying a completed session with an identical manifest
+        is idempotent and answers 200.
+        """
+        bearer = _require_bearer(request)
+        _require_publish_token(request, bearer)
+        project_secret = _require_project_secret(body.project_secret)
+        try:
+            result = services.finalize_upload(
+                upload_id,
+                project_secret=project_secret,
+                manifest=(
+                    [entry.model_dump() for entry in body.manifest]
+                    if body.manifest is not None
+                    else None
+                ),
+                storage=_get_storage(request.app),
+            )
+        except services.ServiceError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=exc.detail
+            ) from exc
+        if result.get("replay"):
+            response.status_code = 200
+        return result
 
     @app.get("/api/v1/versions")
     def versions(

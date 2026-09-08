@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Publish built documentation to a doc-hosting deployment.
 
-Uploads the files of a documentation build directory to the S3 bucket
-under the project's active URL layout and then registers the build with
-the doc-hosting ingestion API (commit hash, version, language, domain,
-root path), exactly as the GitHub Actions workflow does.
+Builds the documentation manifest (relative path, SHA-256 and size of
+every file), asks the doc-hosting publishing API to authorize a direct
+upload, PUTs every file to the short-lived path-restricted presigned S3
+URLs the API returns (the API verifies project/repository authorization
+and computes the storage keys), and then finalizes the upload with the
+manifest so the API verifies the uploaded objects and atomically
+registers the build, exactly as the GitHub Actions workflow does.
 
 Two independent credentials are required, mirroring the API's two gates:
 
@@ -15,6 +18,8 @@ Two independent credentials are required, mirroring the API's two gates:
   claims an unclaimed root path, and every later publication of that root
   must present the same secret).
 
+No S3 credentials are needed: the presigned URLs authorize the uploads.
+
 Neither credential is ever logged, printed, or included in error messages.
 Both are supplied through the environment (or an env file such as the
 ``.juju-deploy.env`` written by ``scripts/deploy.py``); environment
@@ -24,16 +29,14 @@ variables take precedence over the env file.
 from __future__ import annotations
 
 import argparse
-import mimetypes
+import hashlib
 import os
 import pathlib
 import subprocess
 import sys
 from typing import Any
 
-import boto3
 import httpx
-from botocore.config import Config
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -83,83 +86,22 @@ def default_commit_hash() -> str:
         ) from exc
 
 
-def fetch_layout(api_url: str, root_path: str) -> dict[str, Any]:
-    """Return the project's URL layout, defaulting to language+version.
-
-    An unknown root path (a brand-new project) uses the default layout.
-    """
-    try:
-        response = httpx.get(
-            f"{api_url.rstrip('/')}/api/v1/versions",
-            params={"root_path": root_path},
-            timeout=30,
-        )
-    except httpx.HTTPError as exc:
-        raise PublishError(f"unable to query the project layout: {exc}") from exc
-    if response.status_code == 404:
-        return {"language_enabled": True, "version_enabled": True}
-    if response.status_code != 200:
-        raise PublishError(
-            f"unable to query the project layout: the API returned {response.status_code}"
-        )
-    layout = response.json().get("layout")
-    if not isinstance(layout, dict):
-        return {"language_enabled": True, "version_enabled": True}
-    return layout
-
-
-def upload_prefix(
-    root_path: str,
-    layout: dict[str, Any],
-    *,
-    language: str,
-    version: str,
-) -> str:
-    """Return the S3 key prefix for the project's active URL layout."""
-    segments = [root_path]
-    if layout.get("language_enabled", True):
-        segments.append(language)
-    if layout.get("version_enabled", True):
-        segments.append(version)
-    return "/".join(segments)
-
-
-def upload_build(
-    build_dir: pathlib.Path,
-    *,
-    prefix: str,
-    endpoint: str | None,
-    access_key: str,
-    secret_key: str,
-    bucket: str,
-    region: str | None,
-) -> int:
-    """Upload every file under ``build_dir`` to the S3 bucket; return the count."""
-    config = Config(s3={"addressing_style": "path"}) if endpoint else None
-    client = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region or "us-east-1",
-        config=config,
-    )
-    count = 0
+def build_manifest(build_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Return the sorted per-file manifest (path, sha256, size) of the build."""
+    entries: list[dict[str, Any]] = []
     for path in sorted(p for p in build_dir.rglob("*") if p.is_file()):
-        key = f"{prefix}/{path.relative_to(build_dir).as_posix()}"
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        client.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=path.read_bytes(),
-            ContentType=content_type,
+        data = path.read_bytes()
+        entries.append(
+            {
+                "path": path.relative_to(build_dir).as_posix(),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
         )
-        count += 1
-        print(f"uploaded s3://{bucket}/{key} ({content_type})")
-    return count
+    return entries
 
 
-def register_build(
+def begin_upload(
     api_url: str,
     api_token: str,
     project_secret: str,
@@ -169,8 +111,9 @@ def register_build(
     language: str,
     domain: str,
     root_path: str,
+    manifest: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """POST the build metadata to the ingestion API and return the stored entry.
+    """Ask the API to authorize a direct upload; return its presigned URLs.
 
     The deployment-wide ``api_token`` travels as the bearer header and the
     per-root ``project_secret`` travels only inside the JSON body; neither
@@ -178,7 +121,7 @@ def register_build(
     """
     try:
         response = httpx.post(
-            f"{api_url.rstrip('/')}/api/v1/publish",
+            f"{api_url.rstrip('/')}/api/v1/uploads",
             json={
                 "commit_hash": commit_hash,
                 "version": version,
@@ -186,6 +129,7 @@ def register_build(
                 "domain": domain,
                 "root_path": root_path,
                 "project_secret": project_secret,
+                "manifest": manifest,
             },
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=60,
@@ -193,10 +137,61 @@ def register_build(
     except httpx.HTTPError as exc:
         # Never include either credential in errors; httpx errors do not
         # carry request headers or the body.
-        raise PublishError(f"unable to reach the publish API: {exc}") from exc
+        raise PublishError(f"unable to reach the upload API: {exc}") from exc
     if response.status_code != 201:
         raise PublishError(
-            f"publish API returned {response.status_code}: {response.text}"
+            f"upload API returned {response.status_code}: {response.text}"
+        )
+    return response.json()
+
+
+def upload_files(build_dir: pathlib.Path, uploads: list[dict[str, Any]]) -> int:
+    """PUT every build file to its presigned URL with the returned headers."""
+    count = 0
+    for upload in uploads:
+        path = build_dir / upload["path"]
+        try:
+            response = httpx.put(
+                upload["url"],
+                content=path.read_bytes(),
+                headers=upload.get("headers") or {},
+                timeout=300,
+            )
+        except httpx.HTTPError as exc:
+            # The presigned URL (a short-lived authorization of its own)
+            # never appears in the error; only the file path does.
+            raise PublishError(f"unable to upload {upload['path']!r}: {exc}") from exc
+        if response.status_code != 200:
+            raise PublishError(
+                f"upload of {upload['path']!r} failed: the storage returned "
+                f"{response.status_code}"
+            )
+        count += 1
+        print(f"uploaded {upload['path']}")
+    return count
+
+
+def finalize_upload(
+    api_url: str,
+    api_token: str,
+    project_secret: str,
+    *,
+    upload_id: Any,
+    manifest: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Finalize the upload with its manifest; the API verifies and registers."""
+    try:
+        response = httpx.post(
+            f"{api_url.rstrip('/')}/api/v1/uploads/{upload_id}/finalize",
+            json={"project_secret": project_secret, "manifest": manifest},
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=120,
+        )
+    except httpx.HTTPError as exc:
+        raise PublishError(f"unable to reach the finalize API: {exc}") from exc
+    if response.status_code not in (200, 201):
+        raise PublishError(
+            f"finalize API returned {response.status_code}: {response.text}"
         )
     return response.json()
 
@@ -232,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         "--env-file",
         type=pathlib.Path,
         default=None,
-        help="KEY=VALUE file with API_URL/API_TOKEN/PROJECT_SECRET/S3_* settings (e.g. .juju-deploy.env)",
+        help="KEY=VALUE file with API_URL/API_TOKEN/PROJECT_SECRET settings (e.g. .juju-deploy.env)",
     )
     args = parser.parse_args(argv)
 
@@ -254,11 +249,6 @@ def main(argv: list[str] | None = None) -> int:
         api_url = setting("API_URL")
         api_token = setting("API_TOKEN")
         project_secret = setting("PROJECT_SECRET")
-        s3_endpoint = setting("S3_ENDPOINT")
-        s3_access_key = setting("S3_ACCESS_KEY")
-        s3_secret_key = setting("S3_SECRET_KEY")
-        s3_bucket = setting("S3_BUCKET")
-        s3_region = setting("S3_REGION") or "us-east-1"
 
         missing = [
             name
@@ -266,9 +256,6 @@ def main(argv: list[str] | None = None) -> int:
                 ("API_URL", api_url),
                 ("API_TOKEN", api_token),
                 ("PROJECT_SECRET", project_secret),
-                ("S3_ACCESS_KEY", s3_access_key),
-                ("S3_SECRET_KEY", s3_secret_key),
-                ("S3_BUCKET", s3_bucket),
             ]
             if not value
         ]
@@ -282,23 +269,11 @@ def main(argv: list[str] | None = None) -> int:
         commit_hash = args.commit_hash or default_commit_hash()
         domain = args.domain or setting("DOC_DOMAIN") or "localhost"
 
-        layout = fetch_layout(api_url, root_path)
-        prefix = upload_prefix(
-            root_path, layout, language=args.language, version=version
-        )
+        manifest = build_manifest(build_dir)
+        if not manifest:
+            raise PublishError(f"no files found under the build directory: {build_dir}")
 
-        count = upload_build(
-            build_dir,
-            prefix=prefix,
-            endpoint=s3_endpoint,
-            access_key=s3_access_key,
-            secret_key=s3_secret_key,
-            bucket=s3_bucket,
-            region=s3_region,
-        )
-        print(f"uploaded {count} files to s3://{s3_bucket}/{prefix}")
-
-        entry = register_build(
+        begun = begin_upload(
             api_url,
             api_token,
             project_secret,
@@ -307,9 +282,23 @@ def main(argv: list[str] | None = None) -> int:
             language=args.language,
             domain=domain,
             root_path=root_path,
+            manifest=manifest,
+        )
+        key_prefix = begun["key_prefix"]
+        print(f"upload session {begun['upload_id']} authorized under {key_prefix}")
+
+        count = upload_files(build_dir, begun["uploads"])
+        print(f"uploaded {count} files under {key_prefix}")
+
+        entry = finalize_upload(
+            api_url,
+            api_token,
+            project_secret,
+            upload_id=begun["upload_id"],
+            manifest=manifest,
         )
         print(f"registered build: {entry}")
-        served = f"{api_url.rstrip('/')}/{prefix}/"
+        served = f"{api_url.rstrip('/')}/{key_prefix}/"
         print(f"documentation now served at {served}")
         return 0
     except PublishError as exc:

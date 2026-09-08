@@ -4,6 +4,8 @@
   active URL layout (which slug dimensions are enabled).
 * ``Publication``: the mutable current build per (project, language,
   version); republishing upserts this single row.
+* ``UploadSession``: an API-authorised direct upload (presigned begin ->
+  verified finalize); completion atomically registers a publication.
 * ``Redirect``: exact/prefix same-site redirects managed through services
   with loop, reserved-namespace and root-shadow protections.
 * ``PathMigration``: retryable root migration state machine (copy ->
@@ -94,6 +96,56 @@ class Publication(models.Model):
 
     def __str__(self) -> str:
         return f"{self.project.root_path}: {self.language}/{self.version}"
+
+
+class UploadSession(models.Model):
+    """A direct-upload publication session (begin -> upload -> finalize).
+
+    ``begin`` authorizes the publication (root claim and project secret)
+    and records the declared manifest plus the logical S3 key prefix the
+    presigned exact-key URLs were issued for; ``finalize`` re-authenticates,
+    verifies every object's existence, size and SHA-256 in storage and then
+    atomically registers the publication and completes the session. The
+    upload/publication ID handed to the workflow is this row's primary key.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_COMPLETED = "completed"
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "pending (uploads outstanding)"),
+        (STATUS_COMPLETED, "completed (publication registered)"),
+    )
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="upload_sessions"
+    )
+    language = models.CharField(max_length=255)
+    version = models.CharField(max_length=255)
+    commit_hash = models.CharField(max_length=255)
+    domain = models.CharField(max_length=255, blank=True, default="")
+    # Logical S3 key prefix (root path plus the enabled dimension labels)
+    # under which every manifest path is uploaded.
+    key_prefix = models.CharField(max_length=512)
+    # Sorted list of {"path", "sha256", "size"} entries declared at begin;
+    # finalize must present an identical manifest.
+    manifest = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __repr__(self) -> str:
+        return f"<UploadSession {self.pk}:{self.project_id} {self.status}>"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.project.root_path}: {self.language}/{self.version} "
+            f"({self.status})"
+        )
 
 
 class Redirect(models.Model):

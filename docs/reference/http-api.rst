@@ -8,11 +8,147 @@ The OpenAPI schema, Swagger UI, and ReDoc endpoints are disabled.
 
 Returns HTTP 200 and ``{"status":"ok"}``. It does not require S3 settings.
 
-``POST /api/v1/publish``
+Direct-upload authentication
+----------------------------
+
+Both direct-upload endpoints require these independent credentials:
+
+* ``Authorization: Bearer <token>`` must match ``APP_PUBLISH_TOKEN``.
+* ``project_secret`` in the JSON body must be non-empty and match the project
+  secret after the root is claimed.
+
+The bearer token is a deployment-wide gate. The project secret establishes
+root ownership; only its salted hash is stored. The begin endpoint uses the
+same nested-root ownership and disabled-dimension rules as the legacy publish
+endpoint.
+
+``POST /api/v1/uploads``
 ------------------------
 
-Upserts the current publication for a project, language, and version. It
-returns HTTP 201.
+Begins the preferred direct-upload flow and returns HTTP 201. The request body
+contains:
+
+.. code-block:: json
+
+   {
+     "commit_hash": "abc123",
+     "version": "latest",
+     "language": "en",
+     "domain": "docs.example.com",
+     "root_path": "docs",
+     "project_secret": "project-secret",
+     "manifest": [
+       {
+         "path": "index.html",
+         "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+         "size": 1234
+       }
+     ]
+   }
+
+``commit_hash``, ``version``, ``language``, ``domain``, ``root_path``,
+``project_secret``, and ``manifest`` are required. The manifest must be a
+non-empty list. Each entry requires:
+
+* ``path``: a unique, non-empty relative path. Absolute paths, backslashes,
+  control characters, empty segments, ``.`` segments, and ``..`` segments are
+  rejected.
+* ``sha256``: exactly 64 lowercase hexadecimal characters.
+* ``size``: a non-negative JSON integer; booleans and strings are rejected.
+
+The API normalizes and sorts the manifest, authorizes or claims the project
+root, creates a pending upload session, and returns:
+
+.. code-block:: json
+
+   {
+     "upload_id": 42,
+     "root_path": "docs",
+     "key_prefix": "docs/en/latest",
+     "expires_at": "2026-09-08T12:15:00+00:00",
+     "url_ttl": 900,
+     "uploads": [
+       {
+         "path": "index.html",
+         "url": "https://storage.example/...",
+         "headers": {
+           "x-amz-checksum-sha256": "base64-encoded-digest"
+         }
+       }
+     ]
+   }
+
+There is one SigV4 presigned PUT URL for each manifest path. Each URL is bound
+to that exact object key, expiry, and checksum header. The uploader must PUT
+the file bytes to ``url`` with every returned ``headers`` entry unchanged.
+Presigned URLs are temporary credentials and should not be logged or shared.
+The URLs and a pending upload session expire after ``url_ttl`` seconds.
+
+``POST /api/v1/uploads/{upload_id}/finalize``
+------------------------------------------------
+
+Finalizes a direct upload. The request repeats the exact manifest supplied to
+the begin endpoint:
+
+.. code-block:: json
+
+   {
+     "project_secret": "project-secret",
+     "manifest": [
+       {
+         "path": "index.html",
+         "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+         "size": 1234
+       }
+     ]
+   }
+
+The API re-authenticates the project, rejects an expired session or changed
+manifest, rechecks the project's current language/version dimensions, and
+verifies that every object exists with the declared size and SHA-256. It then
+atomically upserts the publication, marks the session completed, and records
+audit events. A verification failure leaves the session pending and does not
+register a publication; it can be retried until expiry.
+
+First completion returns HTTP 201 with:
+
+.. code-block:: json
+
+   {
+     "upload_id": 42,
+     "root_path": "docs",
+     "domain": "docs.example.com",
+     "language": "en",
+     "version": "latest",
+     "commit_hash": "abc123",
+     "registered_at": "2026-09-08T12:01:00+00:00",
+     "replay": false
+   }
+
+Replaying a completed session with the same manifest returns HTTP 200 and
+``replay: true`` without registering or auditing it again. A different
+manifest returns 409.
+
+Direct-upload errors
+--------------------
+
+* 401, with ``WWW-Authenticate: Bearer``: missing or malformed authorization.
+* 403: wrong bearer token, wrong project secret, or an unauthorized nested
+  root claim.
+* 404: unknown ``upload_id`` on finalize.
+* 409: root-ownership or dimension conflict; or, on finalize, expiry, manifest
+  drift, differing replay, missing object, size mismatch, or checksum mismatch.
+* 422: invalid request fields, paths, checksums, sizes, or an empty manifest or
+  project secret.
+* 503: the publish token or required server-side S3 settings are unavailable.
+
+``POST /api/v1/publish`` (legacy register-only)
+------------------------------------------------
+
+Upserts the current publication for a project, language, and version and
+returns HTTP 201. It does not upload or verify objects. It remains available
+for callers that arrange storage separately; new publishers should use the
+direct-upload flow.
 
 Authentication
 ~~~~~~~~~~~~~~
@@ -22,9 +158,6 @@ Both credentials are mandatory:
 * ``Authorization: Bearer <token>`` must match ``APP_PUBLISH_TOKEN``.
 * ``project_secret`` in the JSON body must be non-empty and must match the
   project secret after the root is claimed.
-
-The bearer token is a deployment-wide gate. The project secret establishes
-root ownership; only its salted hash is stored.
 
 Request fields
 ~~~~~~~~~~~~~~

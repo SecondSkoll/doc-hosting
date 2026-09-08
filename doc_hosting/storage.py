@@ -36,7 +36,13 @@ class S3Storage:
             aws_access_key_id=settings.access_key,
             aws_secret_access_key=settings.secret_key,
             region_name=settings.region,
-            config=Config(s3={"addressing_style": settings.addressing_style}),
+            config=Config(
+                s3={"addressing_style": settings.addressing_style},
+                # Deterministic SigV4 presigned URLs: without an explicit
+                # signature version botocore still emits legacy SigV2
+                # query URLs for the us-east-1 region.
+                signature_version="s3v4",
+            ),
         )
 
     @property
@@ -77,6 +83,51 @@ class S3Storage:
                 return False
             raise
         return True
+
+    def presign_put(
+        self, key: str, expires_in: int, checksum_sha256_b64: str | None = None
+    ) -> dict[str, Any]:
+        """Return a short-lived exact-key presigned PUT url for ``key``.
+
+        The URL is restricted to exactly this object key (with the
+        configured ``S3_PATH`` prefix applied) and expires after
+        ``expires_in`` seconds. When ``checksum_sha256_b64`` (the
+        base64-encoded SHA-256 digest) is given, it is signed into the URL
+        and the storage rejects a PUT whose body does not match; the
+        header the caller must send alongside the URL is returned in
+        ``headers``.
+        """
+        params: dict[str, Any] = {"Bucket": self.bucket, "Key": self._full_key(key)}
+        headers: dict[str, str] = {}
+        if checksum_sha256_b64:
+            params["ChecksumSHA256"] = checksum_sha256_b64
+            # With SigV4 presigning the checksum becomes a signed header
+            # the uploader must present unchanged.
+            headers["x-amz-checksum-sha256"] = checksum_sha256_b64
+        url = self._client.generate_presigned_url(
+            "put_object", Params=params, ExpiresIn=expires_in
+        )
+        return {"url": url, "headers": headers}
+
+    def head_object_info(self, key: str) -> dict[str, Any] | None:
+        """Return ``{"size", "checksum_sha256"}`` for ``key``, or ``None``.
+
+        The checksum is the base64-encoded SHA-256 digest as stored by the
+        object (``ChecksumMode=ENABLED``); it is ``None`` when the storage
+        does not report a stored checksum for the object.
+        """
+        try:
+            response = self._client.head_object(
+                Bucket=self.bucket, Key=self._full_key(key), ChecksumMode="ENABLED"
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                return None
+            raise
+        return {
+            "size": response["ContentLength"],
+            "checksum_sha256": response.get("ChecksumSHA256"),
+        }
 
     def list_keys(self, prefix: str = "") -> list[str]:
         """Return the sorted object keys under ``prefix`` (logical keys).

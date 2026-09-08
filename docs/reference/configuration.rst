@@ -62,6 +62,10 @@ Application environment
    * - ``APP_PUBLISH_TOKEN``
      - Required to publish
      - Deployment-wide bearer credential.
+   * - ``DOC_HOSTING_UPLOAD_URL_TTL``
+     - ``900`` seconds
+     - Positive integer lifetime for presigned PUT URLs and upload sessions.
+       Missing, invalid, or non-positive values use 900 seconds.
    * - ``POSTGRESQL_DB_CONNECT_STRING``
      - Deployment database URL
      - Preferred PostgreSQL connection URL.
@@ -104,23 +108,23 @@ Publisher settings
 ------------------
 
 ``scripts/publish.py`` reads environment values before its optional env file.
-It requires ``API_URL``, ``API_TOKEN``, ``PROJECT_SECRET``, ``S3_ACCESS_KEY``,
-``S3_SECRET_KEY``, and ``S3_BUCKET``. ``S3_ENDPOINT`` is optional and
-``S3_REGION`` defaults to ``us-east-1``. ``DOC_DOMAIN`` supplies the domain
-unless ``--domain`` is passed.
+It requires ``API_URL``, ``API_TOKEN``, and ``PROJECT_SECRET``. ``DOC_DOMAIN``
+supplies the domain unless ``--domain`` is passed. It does not read S3
+credentials; the API returns short-lived presigned upload URLs.
 
 ``scripts/deploy.py`` writes ``.juju-deploy.env`` with ``API_URL``,
 ``ADMIN_URL``, ``API_TOKEN``, ``PROJECT_SECRET``, ``S3_ENDPOINT``,
 ``S3_ACCESS_KEY``, ``S3_SECRET_KEY``, ``S3_BUCKET``, and ``S3_REGION``.
+The S3 values support deployment operations and are not required by the
+publisher.
 
 GitHub Actions settings
 -----------------------
 
-The publish workflow maps variables ``DOC_HOSTING_API_URL``,
-``DOC_HOSTING_S3_ENDPOINT``, ``DOC_HOSTING_S3_BUCKET``, and
-``DOC_HOSTING_DOMAIN``. It maps secrets ``DOC_HOSTING_API_TOKEN``,
-``DOC_HOSTING_PROJECT_SECRET``, ``DOC_HOSTING_S3_ACCESS_KEY``, and
-``DOC_HOSTING_S3_SECRET_KEY``.
+The publish workflow maps variables ``DOC_HOSTING_API_URL`` and
+``DOC_HOSTING_DOMAIN``. It maps secrets ``DOC_HOSTING_API_TOKEN`` and
+``DOC_HOSTING_PROJECT_SECRET``. No S3 setting or credential is exposed to the
+workflow.
 
 Keep all generated env files and credentials private. The charm's
 ``publish-token`` is a plain configuration value visible to authorized Juju

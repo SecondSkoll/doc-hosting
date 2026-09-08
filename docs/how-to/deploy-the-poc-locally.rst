@@ -74,19 +74,23 @@ executing the file as shell code. Then check health:
 
    uv run curl "$API_URL/health"
 
-The response is ``{"status":"ok"}``. If cluster addresses are unreachable,
-run these in separate terminals and set ``API_URL`` and ``S3_ENDPOINT`` to the
-localhost addresses before publishing:
+The response is ``{"status":"ok"}``. Direct upload requires both the API and
+the S3 endpoint embedded in its presigned URLs to be reachable from the
+publishing machine. If cluster addresses are unreachable, use a trusted host
+with cluster access or expose both services securely. This API port forward is
+useful for health and management checks, but changing the publisher's
+``S3_ENDPOINT`` does not rewrite URLs signed by the API:
 
 .. code-block:: bash
 
-   uv run microk8s kubectl port-forward --address 127.0.0.1 \
-     -n doc-hosting svc/minio 9000:9000
    uv run microk8s kubectl port-forward --address 127.0.0.1 \
      -n doc-hosting pod/doc-hosting-api-0 8080:8080
 
 Publish and verify
 ------------------
+
+Run these commands from a machine that can reach ``API_URL`` and the storage
+host in the API's presigned URLs:
 
 .. code-block:: bash
 

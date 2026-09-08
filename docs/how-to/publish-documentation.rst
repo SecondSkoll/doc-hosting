@@ -4,8 +4,8 @@ Publish documentation
 Publish with GitHub Actions
 ---------------------------
 
-The ``Publish docs`` workflow runs on pushes to ``main``, tags matching
-``v*``, and manual dispatch. Configure these repository settings:
+The ``Publish docs`` workflow runs on manual dispatch. Configure these
+repository settings:
 
 .. list-table::
    :header-rows: 1
@@ -22,18 +22,6 @@ The ``Publish docs`` workflow runs on pushes to ``main``, tags matching
    * - ``DOC_HOSTING_PROJECT_SECRET``
      - Secret
      - Stable secret for this project's root and permitted nested roots.
-   * - ``DOC_HOSTING_S3_ENDPOINT``
-     - Variable
-     - S3-compatible endpoint reachable by the runner.
-   * - ``DOC_HOSTING_S3_BUCKET``
-     - Variable
-     - Destination bucket.
-   * - ``DOC_HOSTING_S3_ACCESS_KEY``
-     - Secret
-     - S3 access key.
-   * - ``DOC_HOSTING_S3_SECRET_KEY``
-     - Secret
-     - S3 secret key.
    * - ``DOC_HOSTING_DOMAIN``
      - Variable
      - Optional serving domain stored on the project.
@@ -44,14 +32,13 @@ untrusted network. A GitHub-hosted runner cannot reach a private MicroK8s
 cluster; expose the service securely or use a self-hosted runner.
 
 For manual dispatch, optionally supply ``version``, ``language``, and
-``root_path``. A tag build otherwise uses the tag as its version; other builds
-use ``latest``.
+``root_path``. An omitted version uses ``latest``.
 
 Publish from the command line
 -----------------------------
 
-Export both credentials and the S3 settings, or put them in a restricted,
-ignored env file such as ``.juju-deploy.env``. Then build and publish:
+Export the API URL and both credentials, or put them in a restricted, ignored
+env file such as ``.juju-deploy.env``. Then build and publish:
 
 .. code-block:: bash
 
@@ -65,15 +52,22 @@ ignored env file such as ``.juju-deploy.env``. Then build and publish:
 ``latest``. Commit defaults to ``GITHUB_SHA`` and then the current Git commit.
 Domain defaults to ``DOC_DOMAIN`` and then ``localhost``.
 
-The command requires ``API_URL``, ``API_TOKEN``, ``PROJECT_SECRET``,
-``S3_ACCESS_KEY``, ``S3_SECRET_KEY``, and ``S3_BUCKET``. Environment values
-override the env file. ``S3_ENDPOINT`` is optional and ``S3_REGION`` defaults
-to ``us-east-1``.
+The command requires ``API_URL``, ``API_TOKEN``, and ``PROJECT_SECRET``.
+Environment values override the env file. The publisher does not need S3
+credentials.
 
-The script first queries ``GET /api/v1/versions`` to select the project's
-active layout. A new root uses language+version. It uploads files and then
-registers metadata; an upload failure therefore does not update publication
-metadata. Verify the returned serving URL and versions response.
+The script computes each file's relative path, size, and SHA-256, then:
+
+1. Calls ``POST /api/v1/uploads`` with the publication details and manifest.
+2. PUTs each file to its exact-key presigned URL with the returned checksum
+   header.
+3. Calls ``POST /api/v1/uploads/{upload_id}/finalize`` with the same manifest.
+
+The API chooses the active-layout key prefix. It registers the publication
+only after every object passes existence, size, and checksum verification. If
+an upload or verification fails, rerun the command; a pending session can be
+finalized only until its URLs and session expire. Verify the serving URL shown
+by the script and the versions response.
 
 Claim a root safely
 -------------------

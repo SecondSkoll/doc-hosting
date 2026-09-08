@@ -15,6 +15,15 @@ Django admin are thin adapters), so the rules live in exactly one place:
   concurrent bypass (SQLite tests rely on its single-writer model).
 * Publications are upserted per (project, language, version) and audited on
   every push.
+* Direct uploads share the same authorization and registration rules: the
+  API ``begin`` step claims/authenticates the root and issues short-lived
+  exact-key presigned PUT URLs (one per declared manifest file, each bound
+  to the file's SHA-256); the ``finalize`` step re-authenticates, locks the
+  session, verifies every object's existence, size and stored SHA-256 in
+  storage and only then transactionally registers the publication and
+  completes the session. Failures leave the session pending (retryable
+  until it expires) and nothing registered; replaying a completed session
+  with an identical manifest is idempotent.
 * Redirects are same-site absolute paths only, matched exact-first and then
   by longest prefix with suffix preservation, loop/hop protections, reserved
   namespace and registered-root-shadow protections, a resolution cache with
@@ -34,10 +43,14 @@ Django admin are thin adapters), so the rules live in exactly one place:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
 import os
+import re
 import time
 from collections.abc import Iterable
+from datetime import timedelta
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -55,6 +68,7 @@ DEFAULT_REDIRECT_CACHE_TTL_SECONDS = 30.0
 # Arbitrary stable keys for PostgreSQL advisory locks (distinct from the
 # migration advisory lock key used by doc_hosting.db).
 CLAIM_ADVISORY_LOCK_KEY = 0x64F1C1
+MANIFEST_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 class ServiceError(Exception):
@@ -106,6 +120,85 @@ def _acquire_claim_lock() -> None:
             cursor.execute("SELECT pg_advisory_xact_lock(%s)", [CLAIM_ADVISORY_LOCK_KEY])
 
 
+def _resolve_project_for_publication(
+    root: str, project_secret: str
+) -> tuple[models.Project, bool, bool]:
+    """Claim or authenticate the project for ``root`` (caller's transaction).
+
+    Returns ``(project, claimed, secret_adopted)``. The first fully
+    authenticated publication claims an unclaimed root (or adopts the
+    secret of a project imported from the legacy registry).
+
+    Raises:
+        ServiceError: 403 for secret mismatches on the project or a
+            foreign ancestor, 409 when the claim would shadow an existing
+            descendant or was raced by a concurrent claim.
+    """
+    claimed = False
+    existing = models.Project.objects.filter(root_path=root).first()
+    if existing is not None:
+        project = models.Project.objects.select_for_update().get(pk=existing.pk)
+    else:
+        _claim_root(root=root, project_secret=project_secret)
+        project = models.Project.objects.select_for_update().get(root_path=root)
+        claimed = True
+    secret_adopted = False
+    if project.secret_claimed:
+        if not project.check_secret(project_secret):
+            raise ServiceError(403, "invalid project secret for this root path")
+    else:
+        # A project imported from the legacy registry has no secret yet;
+        # the first fully authenticated publication (the deployment
+        # bearer gate was already passed by the API layer) adopts its
+        # project secret.
+        project.set_secret(project_secret)
+        project.save(update_fields=["secret_hash", "updated_at"])
+        claimed = True
+        secret_adopted = True
+    return project, claimed, secret_adopted
+
+
+def _assert_publication_dimensions(
+    project: models.Project, language: str, version: str
+) -> None:
+    """Reject a publication that violates a disabled dimension's sole label."""
+    if not project.language_enabled and language != project.language_label:
+        raise ServiceError(
+            409,
+            "language dimension is disabled for this project; "
+            f"only {project.language_label!r} can be published",
+        )
+    if not project.version_enabled and version != project.version_label:
+        raise ServiceError(
+            409,
+            "version dimension is disabled for this project; "
+            f"only {project.version_label!r} can be published",
+        )
+
+
+def _apply_publication_domain(project: models.Project, domain: str | None) -> None:
+    """Update the project's serving domain when the publication carries one."""
+    if domain is not None and domain != project.domain:
+        project.domain = domain
+        project.save(update_fields=["domain", "updated_at"])
+
+
+def _register_publication(
+    project: models.Project, language: str, version: str, commit_hash: str
+) -> models.Publication:
+    """Upsert the publication row for (project, language, version)."""
+    publication, _ = models.Publication.objects.update_or_create(
+        project=project,
+        language=language,
+        version=version,
+        defaults={
+            "commit_hash": commit_hash,
+            "registered_at": timezone.now(),
+        },
+    )
+    return publication
+
+
 def publish_build(
     *,
     root_path: str,
@@ -133,52 +226,13 @@ def publish_build(
         root = paths.normalize_root_path(root_path)
     except paths.InvalidPathError as exc:
         raise ServiceError(422, str(exc)) from exc
-    claimed = False
     with transaction.atomic():
-        existing = models.Project.objects.filter(root_path=root).first()
-        if existing is not None:
-            project = models.Project.objects.select_for_update().get(pk=existing.pk)
-        else:
-            _claim_root(root=root, project_secret=project_secret)
-            project = models.Project.objects.select_for_update().get(root_path=root)
-            claimed = True
-        secret_adopted = False
-        if project.secret_claimed:
-            if not project.check_secret(project_secret):
-                raise ServiceError(403, "invalid project secret for this root path")
-        else:
-            # A project imported from the legacy registry has no secret yet;
-            # the first fully authenticated publication (the deployment
-            # bearer gate was already passed by the API layer) adopts its
-            # project secret.
-            project.set_secret(project_secret)
-            project.save(update_fields=["secret_hash", "updated_at"])
-            claimed = True
-            secret_adopted = True
-        if not project.language_enabled and language != project.language_label:
-            raise ServiceError(
-                409,
-                "language dimension is disabled for this project; "
-                f"only {project.language_label!r} can be published",
-            )
-        if not project.version_enabled and version != project.version_label:
-            raise ServiceError(
-                409,
-                "version dimension is disabled for this project; "
-                f"only {project.version_label!r} can be published",
-            )
-        if domain is not None and domain != project.domain:
-            project.domain = domain
-            project.save(update_fields=["domain", "updated_at"])
-        publication, _ = models.Publication.objects.update_or_create(
-            project=project,
-            language=language,
-            version=version,
-            defaults={
-                "commit_hash": commit_hash,
-                "registered_at": timezone.now(),
-            },
+        project, claimed, secret_adopted = _resolve_project_for_publication(
+            root, project_secret
         )
+        _assert_publication_dimensions(project, language, version)
+        _apply_publication_domain(project, domain)
+        publication = _register_publication(project, language, version, commit_hash)
         if claimed:
             record_audit(
                 project,
@@ -250,6 +304,336 @@ def _claim_root(*, root: str, project_secret: str) -> None:
         raise ServiceError(
             409, f"root path {root!r} was claimed concurrently; retry the publication"
         ) from exc
+
+
+# --------------------------------------------------------------------------
+# Direct uploads (begin -> presigned PUTs -> verified finalize)
+# --------------------------------------------------------------------------
+
+
+def _checksum_b64(hex_digest: str) -> str:
+    """Return the base64-encoded digest for a lowercase hex SHA-256."""
+    return base64.b64encode(bytes.fromhex(hex_digest)).decode()
+
+
+def _validate_manifest_path(path: str) -> None:
+    """Reject anything that is not a safe relative path below the prefix."""
+    if path.startswith("/") or "\\" in path:
+        raise ServiceError(422, f"manifest path must be a relative path: {path!r}")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in path):
+        raise ServiceError(422, f"manifest path contains control characters: {path!r}")
+    for segment in path.split("/"):
+        if segment in ("", ".", ".."):
+            raise ServiceError(422, f"unsafe manifest path: {path!r}")
+
+
+def validate_manifest(manifest: Any) -> list[dict[str, Any]]:
+    """Validate a build manifest and return it normalized (sorted by path).
+
+    Every entry must declare a safe unique relative ``path``, a lowercase
+    hex SHA-256 ``sha256`` and a non-negative integer ``size``.
+
+    Raises:
+        ServiceError: 422 for any invalid or empty manifest.
+    """
+    if not isinstance(manifest, list) or not manifest:
+        raise ServiceError(422, "manifest must be a non-empty list of file entries")
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in manifest:
+        if not isinstance(item, dict):
+            raise ServiceError(422, "manifest entries must be objects")
+        path = item.get("path")
+        sha256 = item.get("sha256")
+        size = item.get("size")
+        if not isinstance(path, str) or not path:
+            raise ServiceError(422, "manifest entry path must be a non-empty string")
+        _validate_manifest_path(path)
+        if not isinstance(sha256, str) or not MANIFEST_SHA256_RE.fullmatch(sha256):
+            raise ServiceError(
+                422,
+                f"manifest entry sha256 must be a lowercase hex SHA-256 digest: {path!r}",
+            )
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ServiceError(
+                422, f"manifest entry size must be a non-negative integer: {path!r}"
+            )
+        if path in seen:
+            raise ServiceError(422, f"duplicate manifest path: {path!r}")
+        seen.add(path)
+        entries.append({"path": path, "sha256": sha256, "size": size})
+    return sorted(entries, key=lambda entry: entry["path"])
+
+
+def _publication_key_prefix(
+    project: models.Project, language: str, version: str
+) -> str:
+    """Return the logical S3 key prefix for the project's active layout."""
+    segments = [project.root_path]
+    if project.language_enabled:
+        segments.append(language)
+    if project.version_enabled:
+        segments.append(version)
+    return "/".join(segments)
+
+
+def begin_upload(
+    *,
+    root_path: str,
+    language: str,
+    version: str,
+    commit_hash: str,
+    domain: str | None,
+    project_secret: str,
+    manifest: Any,
+    storage: S3Storage,
+    url_ttl: int,
+) -> dict[str, Any]:
+    """Authorize a direct upload and create its (pending) upload session.
+
+    Shares the publish authorization rules (root claim, project secret,
+    disabled dimensions), stores the declared manifest on the session and
+    returns one short-lived exact-key presigned PUT URL per manifest file,
+    each bound to the file's SHA-256 so the storage rejects a mismatching
+    body at PUT time.
+
+    Raises:
+        ServiceError: 422 for an empty secret, unsafe paths or an invalid
+            manifest; 403/409 with the ownership rules of publish_build.
+    """
+    if not project_secret or not project_secret.strip():
+        raise ServiceError(422, "project_secret must not be empty")
+    try:
+        root = paths.normalize_root_path(root_path)
+    except paths.InvalidPathError as exc:
+        raise ServiceError(422, str(exc)) from exc
+    entries = validate_manifest(manifest)
+    expires_at = timezone.now() + timedelta(seconds=url_ttl)
+    with transaction.atomic():
+        project, claimed, secret_adopted = _resolve_project_for_publication(
+            root, project_secret
+        )
+        _assert_publication_dimensions(project, language, version)
+        session = models.UploadSession.objects.create(
+            project=project,
+            language=language,
+            version=version,
+            commit_hash=commit_hash,
+            domain=domain if domain is not None else "",
+            key_prefix=_publication_key_prefix(project, language, version),
+            manifest=entries,
+            status=models.UploadSession.STATUS_PENDING,
+            expires_at=expires_at,
+        )
+        if claimed:
+            record_audit(
+                project,
+                "project.claimed",
+                {
+                    "root_path": root,
+                    "domain": project.domain,
+                    "secret_adopted": secret_adopted,
+                },
+            )
+        record_audit(
+            project,
+            "upload.begun",
+            {
+                "upload_id": session.pk,
+                "language": language,
+                "version": version,
+                "commit_hash": commit_hash,
+                "key_prefix": session.key_prefix,
+                "files": len(entries),
+                "expires_at": expires_at.isoformat(),
+            },
+        )
+    uploads = [
+        {
+            "path": entry["path"],
+            **storage.presign_put(
+                f"{session.key_prefix}/{entry['path']}",
+                expires_in=url_ttl,
+                checksum_sha256_b64=_checksum_b64(entry["sha256"]),
+            ),
+        }
+        for entry in entries
+    ]
+    return {
+        "upload_id": session.pk,
+        "root_path": root,
+        "key_prefix": session.key_prefix,
+        "expires_at": expires_at.isoformat(),
+        "url_ttl": url_ttl,
+        "uploads": uploads,
+    }
+
+
+def _verify_upload_object(
+    storage: S3Storage, key_prefix: str, entry: dict[str, Any]
+) -> None:
+    """Verify one manifest object's existence, size and stored SHA-256.
+
+    The stored checksum comes from HEAD (``ChecksumMode=ENABLED``); storage
+    implementations that do not report it fall back to hashing the object
+    bytes, so verification never trusts an unverified body.
+
+    Raises:
+        ServiceError: 409 when the object is missing or its size or
+            SHA-256 does not match the manifest.
+    """
+    key = f"{key_prefix}/{entry['path']}"
+    info = storage.head_object_info(key)
+    if info is None:
+        raise ServiceError(
+            409,
+            f"the uploaded object for manifest path {entry['path']!r} is "
+            "missing in storage",
+        )
+    if info["size"] != entry["size"]:
+        raise ServiceError(
+            409,
+            f"size mismatch for manifest path {entry['path']!r}: storage "
+            f"holds {info['size']} byte(s), the manifest declares {entry['size']}",
+        )
+    checksum = info.get("checksum_sha256")
+    if not checksum:
+        data = storage.get_bytes(key)
+        if data is None:
+            raise ServiceError(
+                409,
+                f"the uploaded object for manifest path {entry['path']!r} is "
+                "missing in storage",
+            )
+        checksum = base64.b64encode(hashlib.sha256(data).digest()).decode()
+    if checksum != _checksum_b64(entry["sha256"]):
+        raise ServiceError(
+            409,
+            f"sha256 mismatch for manifest path {entry['path']!r}: storage "
+            "holds different content than the manifest declares",
+        )
+
+
+def _upload_result(
+    session: models.UploadSession,
+    project: models.Project,
+    publication: models.Publication | None,
+    *,
+    replay: bool,
+) -> dict[str, Any]:
+    registered_at = (
+        publication.registered_at if publication is not None else session.completed_at
+    )
+    return {
+        "upload_id": session.pk,
+        "root_path": project.root_path,
+        "domain": project.domain,
+        "language": session.language,
+        "version": session.version,
+        "commit_hash": session.commit_hash,
+        "registered_at": registered_at.isoformat() if registered_at else None,
+        "replay": replay,
+    }
+
+
+def finalize_upload(
+    upload_id: Any,
+    *,
+    project_secret: str,
+    manifest: Any,
+    storage: S3Storage,
+) -> dict[str, Any]:
+    """Verify a direct upload and atomically register its publication.
+
+    Re-authenticates the project secret, locks the session row (replays of
+    a completed session are idempotent for an identical manifest and
+    conflict for a differing one), rejects expired sessions and manifest
+    drift, re-asserts the current dimension flags and verifies every
+    object's existence, size and stored SHA-256 before the single
+    transaction registers the publication and completes/audits the session.
+    Any failure rolls back and leaves the session pending (retryable until
+    it expires) with nothing registered.
+
+    Raises:
+        ServiceError: 404 for an unknown upload ID, 403 for a wrong
+            project secret, 422 for an invalid manifest and 409 for
+            replays with a differing manifest, expiry, manifest drift,
+            disabled dimensions or object verification failures.
+    """
+    if not project_secret or not project_secret.strip():
+        raise ServiceError(422, "project_secret must not be empty")
+    entries = validate_manifest(manifest)
+    with transaction.atomic():
+        try:
+            session = models.UploadSession.objects.select_for_update().get(
+                pk=upload_id
+            )
+        except (models.UploadSession.DoesNotExist, ValueError, TypeError):
+            raise ServiceError(404, f"unknown upload session: {upload_id!r}") from None
+        project = models.Project.objects.select_for_update().get(pk=session.project_id)
+        if project.secret_claimed:
+            if not project.check_secret(project_secret):
+                raise ServiceError(403, "invalid project secret for this root path")
+        else:
+            # Unreachable through the API (begin claims or adopts the
+            # secret); kept for parity with publish_build so finalize can
+            # never authenticate against an unclaimed project.
+            project.set_secret(project_secret)
+            project.save(update_fields=["secret_hash", "updated_at"])
+        if session.status == models.UploadSession.STATUS_COMPLETED:
+            if entries != (session.manifest or []):
+                raise ServiceError(
+                    409,
+                    "this upload session is already completed with a "
+                    "different manifest",
+                )
+            publication = project.publications.filter(
+                language=session.language, version=session.version
+            ).first()
+            return _upload_result(session, project, publication, replay=True)
+        if timezone.now() > session.expires_at:
+            raise ServiceError(
+                409,
+                "this upload session has expired; begin a new upload session",
+            )
+        if entries != (session.manifest or []):
+            raise ServiceError(
+                409, "the manifest does not match the session's declared manifest"
+            )
+        _assert_publication_dimensions(project, session.language, session.version)
+        for entry in entries:
+            _verify_upload_object(storage, session.key_prefix, entry)
+        _apply_publication_domain(
+            project, session.domain if session.domain else None
+        )
+        publication = _register_publication(
+            project, session.language, session.version, session.commit_hash
+        )
+        session.status = models.UploadSession.STATUS_COMPLETED
+        session.completed_at = timezone.now()
+        session.save(update_fields=["status", "completed_at", "updated_at"])
+        record_audit(
+            project,
+            "publication.upserted",
+            {
+                "language": session.language,
+                "version": session.version,
+                "commit_hash": session.commit_hash,
+                "domain": project.domain,
+            },
+        )
+        record_audit(
+            project,
+            "upload.completed",
+            {
+                "upload_id": session.pk,
+                "language": session.language,
+                "version": session.version,
+                "commit_hash": session.commit_hash,
+                "files": len(entries),
+            },
+        )
+    return _upload_result(session, project, publication, replay=False)
 
 
 def grouped_versions(

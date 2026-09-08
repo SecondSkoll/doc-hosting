@@ -46,17 +46,16 @@ def docs_build(tmp_path_factory) -> pathlib.Path:
 
 
 def publish_env(connection: dict[str, str]) -> dict[str, str]:
-    """The environment for scripts/publish.py (never prints the credentials)."""
+    """The environment for scripts/publish.py (never prints the credentials).
+
+    No S3 credentials are passed: the API authorizes the direct upload with
+    short-lived presigned URLs and the script holds no storage credentials.
+    """
     return {
         **os.environ,
         "API_URL": connection["api_url"],
         "API_TOKEN": connection["api_token"],
         "PROJECT_SECRET": connection["project_secret"],
-        "S3_ENDPOINT": connection["s3_endpoint"],
-        "S3_ACCESS_KEY": connection["s3_access_key"],
-        "S3_SECRET_KEY": connection["s3_secret_key"],
-        "S3_BUCKET": connection["s3_bucket"],
-        "S3_REGION": "us-east-1",
     }
 
 

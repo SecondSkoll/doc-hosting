@@ -205,6 +205,51 @@ class PublicationAdmin(admin.ModelAdmin):
             )
 
 
+@admin.register(models.UploadSession)
+class UploadSessionAdmin(admin.ModelAdmin):
+    """Inspect direct-upload sessions (view-only; the API owns them)."""
+
+    list_display = (
+        "project",
+        "language",
+        "version",
+        "commit_hash",
+        "key_prefix",
+        "status",
+        "created_at",
+        "expires_at",
+        "completed_at",
+    )
+    list_filter = ("status",)
+    search_fields = ("project__root_path", "commit_hash", "key_prefix")
+    readonly_fields = (
+        "project",
+        "language",
+        "version",
+        "commit_hash",
+        "domain",
+        "key_prefix",
+        "manifest",
+        "status",
+        "expires_at",
+        "created_at",
+        "updated_at",
+        "completed_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_view_permission(self, request, obj=None):
+        return True
+
+
 @admin.register(models.Redirect)
 class RedirectAdmin(ServiceBackedAdmin):
     """Manage redirects through the validation and audit services."""

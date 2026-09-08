@@ -17,6 +17,10 @@ admin password is created automatically.
    * - Publications
      - Inspect current records or delete them with an audit event. Add and edit
        are disabled; publishing owns these records.
+   * - Upload sessions
+     - Inspect direct-upload manifests, key prefixes, status, expiry, and
+       completion times. Add, edit, and delete are disabled; the API owns these
+       records.
    * - Redirects
      - Add, update, enable/disable, and delete exact or prefix rules through the
        redirect validation service.

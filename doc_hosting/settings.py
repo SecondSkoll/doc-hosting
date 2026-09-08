@@ -8,6 +8,8 @@ injected by the paas-charm based charm:
 * ``S3_ENDPOINT``, ``S3_REGION``, ``S3_PATH``, ``S3_URI_STYLE``,
   ``S3_ADDRESSING_STYLE`` (optional, from the same integration)
 * ``APP_PUBLISH_TOKEN`` (the charm's ``publish-token`` config option)
+* ``DOC_HOSTING_UPLOAD_URL_TTL`` (optional, seconds the presigned direct
+  upload URLs stay valid; invalid or non-positive values fall back to 900)
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ from dataclasses import dataclass
 
 class SettingsError(RuntimeError):
     """Raised when required settings (environment variables) are missing."""
+
+
+DEFAULT_UPLOAD_URL_TTL_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,7 @@ class Settings:
     path_prefix: str
     addressing_style: str
     publish_token: str | None
+    upload_url_ttl: int
 
 
 def _normalize_addressing_style(*values: str | None) -> str:
@@ -44,6 +50,24 @@ def _normalize_addressing_style(*values: str | None) -> str:
             return "virtual"
         return "path"
     return "path"
+
+
+def _upload_url_ttl() -> int:
+    """Return the presigned upload URL TTL in seconds.
+
+    ``DOC_HOSTING_UPLOAD_URL_TTL`` may override it; invalid or non-positive
+    values fall back to the default.
+    """
+    raw = os.environ.get("DOC_HOSTING_UPLOAD_URL_TTL")
+    if raw is None:
+        return DEFAULT_UPLOAD_URL_TTL_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_UPLOAD_URL_TTL_SECONDS
+    if value <= 0:
+        return DEFAULT_UPLOAD_URL_TTL_SECONDS
+    return value
 
 
 def get_settings() -> Settings:
@@ -73,4 +97,5 @@ def get_settings() -> Settings:
             os.environ.get("S3_ADDRESSING_STYLE"), os.environ.get("S3_URI_STYLE")
         ),
         publish_token=os.environ.get("APP_PUBLISH_TOKEN") or None,
+        upload_url_ttl=_upload_url_ttl(),
     )

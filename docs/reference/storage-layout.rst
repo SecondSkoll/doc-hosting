@@ -17,6 +17,10 @@ The deployed source of truth is PostgreSQL. Django defines these records:
    * - ``Publication``
      - Mutable current commit and registration time, unique for each project,
        language, and version.
+   * - ``UploadSession``
+     - Project, publication dimensions, commit, domain, logical key prefix,
+       sorted manifest, expiry, timestamps, and ``pending`` or ``completed``
+       status for an API-authorized direct upload.
    * - ``Redirect``
      - Unique source/match-type pair, target, enabled flag, and optional project.
    * - ``PathMigration``
@@ -29,10 +33,13 @@ The deployed source of truth is PostgreSQL. Django defines these records:
      - Event type, project/root association, JSON payload, and timestamp.
        Application and admin access is read-only.
 
-Each publication upsert replaces the current row for its
-project/language/version and appends ``publication.upserted`` to the audit
-trail. Other control-plane changes also append events. Audit payloads do not
-contain project secrets.
+Beginning a direct upload appends ``upload.begun``. Successful finalization
+atomically replaces the current publication row for its
+project/language/version, completes the session, and appends
+``publication.upserted`` and ``upload.completed``. Failed verification does
+not register a publication. Other control-plane changes also append events.
+Audit payloads contain neither project secrets, bearer tokens, nor presigned
+URLs.
 
 S3 object layouts
 -----------------
@@ -48,9 +55,10 @@ select one of four key prefixes:
    {root}/<page>
 
 If ``S3_PATH`` is configured, its stripped value prefixes every application
-key. The publisher assigns content types from filenames and defaults to
-``application/octet-stream``; the server independently infers response media
-types.
+key. For direct uploads, the API creates one exact-key, checksum-bound
+presigned PUT URL per manifest file. Finalization verifies object existence,
+size, and SHA-256 before registering the build. The server infers response
+media types from filenames.
 
 Legacy registry import
 ----------------------

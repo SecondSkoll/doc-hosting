@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  build:
+    name: Build artifacts
+    uses: canonical/charm-ci/.github/workflows/build-artifacts.yml@0eef5b8cbef3ee74907850f790cab64bcf0499e5  # v1.0.0
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    with:
+      pre-build-rock-script: >-
+        uv export --frozen --no-dev --no-hashes --no-emit-project
+        --format requirements.txt --output-file requirements.txt
+
   unit:
     name: Unit tests
     runs-on: ubuntu-latest

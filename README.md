@@ -150,6 +150,15 @@ Unit tests run in CI via
 [`.github/workflows/test.yaml`](.github/workflows/test.yaml); integration
 tests are intentionally not run there (they need microk8s/Juju on the host).
 
+The same test workflow also builds the rock and charm declared in
+[`artifacts.yaml`](artifacts.yaml). After a successful run for a commit on
+`main`, [`.github/workflows/publish-edge.yaml`](.github/workflows/publish-edge.yaml)
+publishes those artifacts to the `latest/edge` Charmhub channel. Configure a
+`charmhub-edge` GitHub environment with a `CHARMCRAFT_AUTH` secret containing
+an exported Charmcraft token with permission to upload and release
+`doc-hosting-api`. The environment can use protection rules to require approval
+before publication.
+
 ## Repository layout
 
 ```

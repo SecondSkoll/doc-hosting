@@ -1,0 +1,24 @@
+name: Publish charm
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  publish:
+    uses: canonical/charm-ci/.github/workflows/publish-artifacts.yml@0eef5b8cbef3ee74907850f790cab64bcf0499e5  # v1.0.0
+    permissions:
+      actions: read
+      # Required for the reusable workflow to create the combined release.
+      contents: write
+    with:
+      channel: latest/edge
+      integration-workflow-name: test.yaml
+      create-tags: false
+      create-release: true
+      environment: charmhub-edge
+    secrets:
+      CHARMHUB_TOKEN: ${{ secrets.CHARMCRAFT_AUTH }}

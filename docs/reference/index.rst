@@ -1,7 +1,7 @@
 Reference
 =========
 
-Use this section to look up the system's interfaces and implementation details.
+Use this section to look up the system's interfaces and exact behavior.
 
 .. toctree::
    :maxdepth: 1
@@ -10,3 +10,4 @@ Use this section to look up the system's interfaces and implementation details.
    http-api
    configuration
    storage-layout
+   management

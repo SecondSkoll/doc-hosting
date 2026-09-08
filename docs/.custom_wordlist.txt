@@ -2,6 +2,7 @@
 API
 ASGI
 boto3
+boolean
 Charmcraft
 dirhtml
 doc-hosting
@@ -9,6 +10,7 @@ FastAPI
 GitHub
 Juju
 jmespath
+lowercased
 Makefile
 MicroK8s
 MinIO
@@ -24,7 +26,13 @@ Rockcraft
 S3
 s3-integrator
 Sphinx
+subtree
 usr-merge
 uv
 Vale
 env
+retryable
+Truthy
+untrusted
+upsert
+upserts

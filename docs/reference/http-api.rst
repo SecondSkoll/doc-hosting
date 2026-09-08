@@ -1,59 +1,145 @@
 HTTP API
 ========
 
+The OpenAPI schema, Swagger UI, and ReDoc endpoints are disabled.
+
 ``GET /health``
 ---------------
 
-Returns HTTP 200 and ``{"status":"ok"}``. It does not require S3
-configuration.
+Returns HTTP 200 and ``{"status":"ok"}``. It does not require S3 settings.
 
 ``POST /api/v1/publish``
 ------------------------
 
-Registers a build and returns HTTP 201. Send ``Authorization: Bearer <token>``
-and a JSON body with required string fields ``commit_hash``, ``version``,
-``language``, ``domain``, and ``root_path``.
+Upserts the current publication for a project, language, and version. It
+returns HTTP 201.
 
-``root_path``, ``language``, and ``version`` must each be one URL-safe segment:
-the first character is alphanumeric and remaining characters are alphanumeric,
-dot, underscore, or hyphen. ``.`` and ``..`` are rejected.
+Authentication
+~~~~~~~~~~~~~~
+
+Both credentials are mandatory:
+
+* ``Authorization: Bearer <token>`` must match ``APP_PUBLISH_TOKEN``.
+* ``project_secret`` in the JSON body must be non-empty and must match the
+  project secret after the root is claimed.
+
+The bearer token is a deployment-wide gate. The project secret establishes
+root ownership; only its salted hash is stored.
+
+Request fields
+~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Type
+     - Constraint
+   * - ``commit_hash``
+     - string
+     - Required.
+   * - ``version``
+     - string
+     - Required URL-safe segment.
+   * - ``language``
+     - string
+     - Required URL-safe segment.
+   * - ``domain``
+     - string
+     - Required; replaces the project's current domain when changed.
+   * - ``root_path``
+     - string
+     - Required normalized project root; may contain multiple segments.
+   * - ``project_secret``
+     - string
+     - Required and non-empty.
+
+A URL-safe segment begins with an alphanumeric character and then contains
+only alphanumeric characters, dots, underscores, or hyphens. ``.`` and ``..``
+are invalid. Root paths are trimmed, lowercased, stripped of leading/trailing
+slashes, and have repeated slashes collapsed. Their first segment cannot be
+``api``, ``manage``, ``health``, or ``_registry``.
+
+Ownership uses segment boundaries. For example, ``project-1`` does not own
+``project-10``. A new nested root such as ``project-1/guides`` requires a
+secret matching an existing ancestor. A new parent that would shadow an
+existing descendant is rejected. If legacy import created an unclaimed
+project, its first fully authenticated publication adopts the supplied secret.
 
 The response contains ``root_path``, ``domain``, ``language``, ``version``,
-``commit_hash``, and an ISO 8601 UTC ``registered_at`` timestamp. Registering
-the same language and version replaces its previous entry; registering any
-build updates the root path's domain.
+``commit_hash``, ``registered_at`` (ISO 8601), and boolean ``claimed``. A
+repeat publication replaces the existing publication row for the same
+project/language/version pair and creates another audit event.
 
-Authentication and configuration responses are:
+Errors
+~~~~~~
 
-* 401 with ``WWW-Authenticate: Bearer`` for a missing or malformed header.
-* 403 for a mismatched token.
-* 503 when the token or required S3 configuration is absent.
-* 422 for an invalid body or unsafe slug.
+* 401, with ``WWW-Authenticate: Bearer``: missing or malformed authorization.
+* 403: wrong bearer token, wrong project secret, or a nested claim with no
+  matching ancestor secret.
+* 409: a claim shadows an existing descendant, a concurrent claim won, or a
+  language/version conflicts with a disabled dimension's sole label.
+* 422: invalid fields, root path, language, version, or empty project secret.
+* 503: the bearer token or required S3 settings are unavailable.
 
 ``GET /api/v1/versions``
 ------------------------
 
-Requires the ``root_path`` query parameter and accepts an optional ``language``
-filter. It returns HTTP 200 with ``root_path``, ``domain``, and ``versions``.
-Each version contains ``version``, a sorted ``languages`` list, and the commit
-hash from the latest registered matching build. It returns 404 for an unknown
-root path and 422 for an unsafe root path or missing required parameter.
+The public endpoint requires ``root_path`` and accepts optional ``language``.
+It returns normalized ``root_path``, ``domain``, ``versions``, and ``layout``.
+Each version entry contains ``version``, sorted ``languages``, and the commit
+hash of the latest matching publication encountered. ``layout`` contains:
 
-Documentation serving
----------------------
+.. code-block:: json
 
-``GET /{root_path}/{language}/{version}`` returns a 307 redirect to the same
-path with a trailing slash.
+   {
+     "language_enabled": true,
+     "version_enabled": true,
+     "language_label": "",
+     "version_label": ""
+   }
 
-``GET /{root_path}/{language}/{version}/{doc_path}`` retrieves an S3 object.
-A trailing slash resolves only to ``index.html``. A path without a trailing
-slash first checks the exact object and then ``<path>/index.html``. The response
-content type is inferred from the candidate filename, defaulting to
-``application/octet-stream``. Missing objects and path traversal segments
-return 404. For content requests, root path, language, and version must be safe
-slugs. The trailing-slash redirect itself does not perform slug validation.
+It returns 404 for an unknown root and 422 for an invalid or missing root.
 
-Swagger UI, ReDoc, and the OpenAPI schema endpoints are disabled.
+Redirect and content serving
+----------------------------
 
-See :doc:`storage-layout` for object keys and
-:doc:`../how-to/publish-documentation` to publish a build.
+Requests first resolve enabled redirects, then use the longest matching
+registered root and that project's active layout.
+
+* Exact redirects match one normalized path only.
+* Prefix redirects match on segment boundaries, preserve the remaining suffix,
+  and use the longest matching prefix; exact matches take priority.
+* Redirect chains resolve to the final target and return 301. A loop or chain
+  beyond 10 hops returns 508.
+* Redirects are same-site absolute paths. External and protocol-relative
+  targets are unsupported.
+
+The four content layouts are:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Language
+     - Version
+     - URL and S3 key prefix
+   * - enabled
+     - enabled
+     - ``/{root}/{language}/{version}/``
+   * - enabled
+     - disabled
+     - ``/{root}/{language}/``
+   * - disabled
+     - enabled
+     - ``/{root}/{version}/``
+   * - disabled
+     - disabled
+     - ``/{root}/``
+
+A layout root without its trailing slash returns 307. A trailing slash loads
+``index.html``. Other paths try the exact object and then ``<path>/index.html``.
+Missing, incomplete-layout, unclaimed, and traversal paths return 404 without
+exposing an internal S3 key.
+
+See :doc:`storage-layout` for persistence and
+:doc:`../how-to/publish-documentation` for the publishing procedure.

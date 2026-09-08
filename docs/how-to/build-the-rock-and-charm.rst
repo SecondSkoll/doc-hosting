@@ -26,13 +26,13 @@ Pack the rock with experimental extensions enabled:
 
 .. code-block:: bash
 
-   ROCKCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS=true rockcraft pack
+   ROCKCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS=true uv run rockcraft pack
 
 Copy the newest ``doc-hosting-api_*.rock`` to the local registry:
 
 .. code-block:: bash
 
-   rockcraft.skopeo copy --insecure-policy --dest-tls-verify=false \
+   uv run rockcraft.skopeo copy --insecure-policy --dest-tls-verify=false \
      oci-archive:doc-hosting-api_0.1_amd64.rock \
      docker://localhost:32000/doc-hosting-api:0.1
 
@@ -41,12 +41,12 @@ Replace the archive name with the file produced by Rockcraft.
 Build the charm
 ---------------
 
-Run Charmcraft from ``charm/``:
+Run Charmcraft against ``charm/``:
 
 .. code-block:: bash
 
-   cd charm
-   CHARMCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS=true charmcraft pack
+   CHARMCRAFT_ENABLE_EXPERIMENTAL_EXTENSIONS=true uv run charmcraft pack \
+     --project-dir charm
 
 Alternatively, run the complete exact sequence, including automatic newest
 artifact selection, with:

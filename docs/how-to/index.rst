@@ -8,6 +8,7 @@ Use these guides to complete common development and operation tasks.
 
    deploy-the-poc-locally
    publish-documentation
+   manage-control-plane
    build-the-rock-and-charm
    run-tests
    build-and-check-the-docs

@@ -28,8 +28,11 @@ extensions:
 parts:
   fastapi-framework/install-app:
     prime:
-      # the ASGI entrypoint and the application package
+      # the ASGI entrypoint, the Django management entrypoint (the charm runs
+      # `python3 manage.py migrate` before starting the service) and the
+      # application package
       - app/app.py
+      - app/manage.py
       - app/doc_hosting
   fastapi-framework/dependencies:
     # Build fixes for the python plugin:

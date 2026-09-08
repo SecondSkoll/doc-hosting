@@ -1,8 +1,8 @@
 Deploy the proof of concept locally
 ===================================
 
-Deploy the complete stack on a local Juju and MicroK8s environment, publish
-this documentation, and verify that the API serves it.
+Deploy MinIO, PostgreSQL, and the API on local Juju/MicroK8s, create an admin
+account, publish this documentation, and verify it.
 
 Prerequisites
 -------------
@@ -12,8 +12,9 @@ interactive terminal and do not run the complete script as root.
 
 .. warning::
 
-   This deployment uses plain HTTP. Keep services and port forwards bound to
-   localhost, and do not expose its bearer token or S3 credentials.
+   This deployment uses plain HTTP. Keep services and port forwards on a
+   trusted machine. Do not expose its bearer token, project secret, admin
+   session, or S3 credentials.
 
 Set up, build, and deploy
 -------------------------
@@ -24,102 +25,102 @@ Set up, build, and deploy
    uv run scripts/deploy.py all
 
 ``all`` runs ``setup``, ``build``, and ``deploy``. Setup installs the required
-snaps, initializes LXD when needed, enables MicroK8s host-path storage, registry,
-and DNS, and bootstraps ``doc-hosting-controller``. If setup adds your account
-to ``snap_microk8s``, log out and in, then rerun the command.
+snaps, initializes LXD when needed, enables MicroK8s host-path storage,
+registry, and DNS, and bootstraps ``doc-hosting-controller``. If setup adds
+your account to ``snap_microk8s``, log out and in, then rerun it.
 
 An existing MicroK8s installation must already use Kubernetes 1.34. Setup does
-not change its channel automatically because Kubernetes upgrades must proceed
-one minor release at a time. If an older cluster is disposable, remove it with
-``sudo snap remove microk8s --purge`` and rerun setup to install
-``1.34-strict/stable``. Back up and upgrade a cluster with valuable workloads
-instead.
+not upgrade it. The deployment creates the ``doc-hosting`` model and deploys
+MinIO, ``s3-integrator`` track 2, ``postgresql-k8s`` track 14, and
+``doc-hosting-api``. It integrates both S3 and PostgreSQL and waits for all four
+applications.
 
-Deployment creates the ``doc-hosting`` model and deploys MinIO,
-``s3-integrator`` track 2, and ``doc-hosting-api``. It writes credentials and
-endpoints to ``.juju-deploy.env``. Treat this file as a secret.
+The generated ``.juju-deploy.env`` contains credentials and endpoints,
+including ``PROJECT_SECRET`` and ``ADMIN_URL``. Restrict access to it.
 
-Reach the services
+Create a superuser
+------------------
+
+No account or password is created automatically. Enter the API unit and run
+the Django command with the application's injected environment available:
+
+.. code-block:: bash
+
+   uv run manage.py createsuperuser
+
+Run this from a trusted administrative environment with the deployed
+``APP_SECRET_KEY`` and ``POSTGRESQL_DB_CONNECT_STRING`` set. Do not copy their
+values into shell history. The command creates the account in the same
+PostgreSQL database used by the service.
+
+Before exposing the admin through an ingress, configure the public host and
+HTTPS origin:
+
+.. code-block:: bash
+
+   uv run juju config -m doc-hosting doc-hosting-api \
+     allowed-hosts=docs.example.com \
+     csrf-trusted-origins=https://docs.example.com
+
+Terminate TLS at the ingress. Open the generated ``ADMIN_URL`` and sign in.
+
+Reach and verify the services
+-----------------------------
+
+Read ``API_URL`` from the generated file and set it in your shell without
+executing the file as shell code. Then check health:
+
+.. code-block:: bash
+
+   uv run curl "$API_URL/health"
+
+The response is ``{"status":"ok"}``. If cluster addresses are unreachable,
+run these in separate terminals and set ``API_URL`` and ``S3_ENDPOINT`` to the
+localhost addresses before publishing:
+
+.. code-block:: bash
+
+   uv run microk8s kubectl port-forward --address 127.0.0.1 \
+     -n doc-hosting svc/minio 9000:9000
+   uv run microk8s kubectl port-forward --address 127.0.0.1 \
+     -n doc-hosting pod/doc-hosting-api-0 8080:8080
+
+Publish and verify
 ------------------
 
 .. code-block:: bash
 
-   source .juju-deploy.env
-   curl "$API_URL/health"
-
-The response is ``{"status":"ok"}``. If cluster addresses are unreachable,
-run these commands in separate terminals:
-
-.. code-block:: bash
-
-   microk8s kubectl port-forward -n doc-hosting svc/minio 9000:9000
-   microk8s kubectl port-forward -n doc-hosting pod/doc-hosting-api-0 8080:8080
-
-Then override the generated endpoints:
-
-.. code-block:: bash
-
-   export API_URL=http://localhost:8080
-   export S3_ENDPOINT=http://localhost:9000
-   curl "$API_URL/health"
-
-Build and publish the documentation
------------------------------------
-
-.. code-block:: bash
-
-   make docs-html DOCS_BUILDDIR=_build/dirhtml
+   uv run --group docs sphinx-build -b dirhtml docs docs/_build/dirhtml
    uv run scripts/publish.py --env-file .juju-deploy.env \
      --build-dir docs/_build/dirhtml
+   uv run curl "$API_URL/docs/en/latest/"
+   uv run curl "$API_URL/api/v1/versions?root_path=docs"
 
-Environment variables override values from ``.juju-deploy.env``. The default
-publication is stored under ``docs/en/latest/``.
+The first publication claims ``docs`` using the generated project secret. See
+:doc:`publish-documentation` for other roots and layouts.
 
-Verify the publication
-----------------------
-
-.. code-block:: bash
-
-   curl "$API_URL/docs/en/latest/"
-   curl "$API_URL/docs/en/latest/reference/"
-   curl "$API_URL/api/v1/versions?root_path=docs"
-
-The first response contains the ``doc-hosting`` heading, and the second
-contains the ``Reference`` heading. Edit ``docs/``, rebuild, and republish to
-iterate. Use publish flags for another version, language, or root path; see
-:doc:`publish-documentation`.
-
-Tear down the deployment
-------------------------
+Tear down
+---------
 
 .. code-block:: bash
 
    uv run scripts/deploy.py teardown
    uv run scripts/deploy.py teardown --controller
-   rm .juju-deploy.env
 
 The first command destroys the model and its storage. The second also destroys
-the controller and can remove this project's verified orphaned controller
-namespace after an interrupted bootstrap. Installed snaps remain.
+the controller and can remove a verified orphaned controller namespace. Delete
+``.juju-deploy.env`` securely after teardown.
 
-Troubleshoot the deployment
-----------------------------
+Troubleshoot
+------------
 
-* For blocked applications, inspect ``juju status -m doc-hosting`` and
-  ``juju debug-log -m doc-hosting``.
-* For unreachable services, keep both port-forward commands running and
-  re-export the localhost endpoints.
-* For MicroK8s permission failures, log out and in after group membership is
-  added.
-* If setup reports an unregistered controller namespace and it is disposable,
-  run ``uv run scripts/deploy.py teardown --controller`` before retrying.
-* For a pending controller pod, use the scheduling, storage, and image-pull
-  diagnostics printed by setup. Run ``sudo microk8s inspect`` for a full report.
-* If CoreDNS or Calico is crash-looping, inspect the current and previous
-   container logs printed by setup. Both failing together indicates an unhealthy
-   Kubernetes cluster rather than a Juju problem. A stale cluster on an older
-   snap revision should be upgraded one minor version at a time or, when
-   disposable, purged and recreated on ``1.34-strict/stable``.
+* Inspect blocked applications with ``uv run juju status -m doc-hosting`` and
+  ``uv run juju debug-log -m doc-hosting``.
+* Keep both port forwards running and override both host-side endpoints.
+* After MicroK8s group membership changes, log out and in.
+* Resume an interrupted controller setup only after following the diagnostics
+  printed by the script.
 
-See :doc:`../reference/components` for the deployed components and
-:doc:`../reference/configuration` for generated environment values.
+This deployment procedure was not executed in the latest sandbox review
+because snapd and Juju were unavailable. Its command and configuration names
+were checked against ``scripts/deploy.py`` and the charm declaration.

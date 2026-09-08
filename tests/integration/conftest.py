@@ -7,7 +7,9 @@ pytest-jubilant creates a temporary model and destroys it on teardown.
 The deployment mirrors ``scripts/deploy.py deploy``: MinIO provides the S3
 storage backend, the s3-integrator charm (track 2) provides the ``s3``
 interface to the doc-hosting-api charm (configured with the MinIO endpoint
-and credentials and the bucket to use).
+and credentials and the bucket to use), and PostgreSQL (postgresql-k8s,
+track 14) provides the ``postgresql`` interface for the control-plane
+database.
 """
 
 from __future__ import annotations
@@ -28,8 +30,11 @@ MINIO = "minio"
 MINIO_CHANNEL = "latest/edge"
 S3_INTEGRATOR = "s3-integrator"
 S3_INTEGRATOR_CHANNEL = "2/stable"
+POSTGRESQL = "postgresql-k8s"
+POSTGRESQL_CHANNEL = "14/stable"
 BUCKET = "doc-hosting"
 TOKEN = "integration-token"
+PROJECT_SECRET = "integration-project-secret"
 MINIO_ACCESS_KEY = "doc-hosting-int"
 MINIO_SECRET_KEY = "integration-secret-key"
 APP_IMAGE = "localhost:32000/doc-hosting-api:0.1"
@@ -97,7 +102,7 @@ def built_artifacts() -> tuple[pathlib.Path, str]:
 
 @pytest.fixture(scope="module")
 def deployment(juju: jubilant.Juju, built_artifacts: tuple[pathlib.Path, str]):
-    """Deploy MinIO + s3-integrator + the doc-hosting-api charm and wait for active."""
+    """Deploy MinIO + s3-integrator + PostgreSQL + the charm and wait for active."""
     charm_file, app_image = built_artifacts
 
     juju.deploy(
@@ -126,14 +131,19 @@ def deployment(juju: jubilant.Juju, built_artifacts: tuple[pathlib.Path, str]):
             "credentials": secret_uri,
         },
     )
+    juju.deploy(POSTGRESQL, POSTGRESQL, channel=POSTGRESQL_CHANNEL)
     juju.deploy(charm_file, APP, resources={"app-image": app_image})
     juju.integrate(f"{APP}:s3", f"{S3_INTEGRATOR}:s3-credentials")
+    juju.integrate(f"{APP}:postgresql", f"{POSTGRESQL}:database")
+    # Only the publish token is configured; the admin superuser is never
+    # created automatically (manual `manage.py createsuperuser`).
     juju.config(APP, {"publish-token": TOKEN})
 
     juju.wait(
         lambda status: (
             status.apps[MINIO].is_active
             and status.apps[S3_INTEGRATOR].is_active
+            and status.apps[POSTGRESQL].is_active
             and status.apps[APP].is_active
         ),
         timeout=1500,
@@ -141,6 +151,7 @@ def deployment(juju: jubilant.Juju, built_artifacts: tuple[pathlib.Path, str]):
         error=lambda status: (
             status.apps[APP].app_status.current == "error"
             or status.apps[S3_INTEGRATOR].app_status.current == "error"
+            or status.apps[POSTGRESQL].app_status.current == "error"
         ),
     )
     yield
@@ -183,6 +194,8 @@ def connection(juju: jubilant.Juju, deployment) -> dict[str, str]:
     return {
         "api_url": api_url,
         "api_token": TOKEN,
+        "project_secret": PROJECT_SECRET,
+        "admin_url": f"{api_url}/manage/",
         "s3_endpoint": minio_endpoint,
         "s3_access_key": access_key,
         "s3_secret_key": secret_key,

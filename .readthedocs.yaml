@@ -11,13 +11,16 @@ build:
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ] && git diff --quiet origin/main -- docs/ Makefile pyproject.toml uv.lock .readthedocs.yaml; then
           exit 183
         fi
-    create_environment:
-      - python -m pip install uv
-    install:
-      - UV_PROJECT_ENVIRONMENT=$READTHEDOCS_VIRTUALENV_PATH uv sync --frozen --group docs
     build:
       html:
         - make -C docs html DOCS_VENVDIR=$READTHEDOCS_VIRTUALENV_PATH DOCS_BUILDDIR=$READTHEDOCS_OUTPUT/html
+
+python:
+  install:
+    - method: uv
+      command: sync
+      groups:
+        - docs
 
 sphinx:
   configuration: docs/conf.py

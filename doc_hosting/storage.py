@@ -1,8 +1,9 @@
-"""S3-backed storage for built documentation and registry metadata.
+"""S3-backed storage for built documentation and legacy registry metadata.
 
 The object key layout mirrors the served URL paths
-(``{root_path}/{language}/{version}/<page>``); registry metadata is kept as
-JSON objects under the reserved ``_registry/`` prefix in the same bucket.
+(``{root_path}/{language}/{version}/<page>``); legacy registry metadata is
+kept as JSON objects under the reserved ``_registry/`` prefix in the same
+bucket and is only read (for the idempotent importer into PostgreSQL).
 """
 
 from __future__ import annotations
@@ -77,30 +78,57 @@ class S3Storage:
             raise
         return True
 
+    def list_keys(self, prefix: str = "") -> list[str]:
+        """Return the sorted object keys under ``prefix`` (logical keys).
+
+        Logical keys exclude the configured ``S3_PATH`` prefix but keep the
+        caller's prefix (matching :meth:`get_bytes` and :meth:`copy_object`).
+        """
+        full_prefix = self._full_key(prefix)
+        keys: list[str] = []
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=full_prefix):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        path_prefix = self._settings.path_prefix
+        if path_prefix:
+            strip = len(path_prefix) + 1
+            keys = [key[strip:] for key in keys]
+        return sorted(keys)
+
+    def copy_object(self, source: str, destination: str) -> None:
+        """Copy one object to ``destination`` (idempotent: overwrites)."""
+        self._client.copy_object(
+            Bucket=self.bucket,
+            Key=self._full_key(destination),
+            CopySource={"Bucket": self.bucket, "Key": self._full_key(source)},
+        )
+
+    def delete_object(self, key: str) -> None:
+        """Delete one object; deleting a missing key is not an error."""
+        self._client.delete_object(Bucket=self.bucket, Key=self._full_key(key))
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete every object under ``prefix``; return the deleted count."""
+        keys = self.list_keys(prefix)
+        for key in keys:
+            self.delete_object(key)
+        return len(keys)
+
     def list_registry_root_paths(self) -> list[str]:
-        """Return the root paths that have a registry entry in the bucket."""
+        """Return the root paths that have a legacy registry entry in the bucket."""
         root_paths: list[str] = []
         prefix = self._full_key(REGISTRY_PREFIX)
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
-                name = obj["Key"][len(prefix) :]
+                name = obj["Key"][len(prefix):]
                 if name.endswith(REGISTRY_SUFFIX):
                     root_paths.append(name[: -len(REGISTRY_SUFFIX)])
         return sorted(root_paths)
 
     def get_registry(self, root_path: str) -> dict[str, Any] | None:
-        """Return the parsed registry JSON for ``root_path``, or ``None``."""
+        """Return the parsed legacy registry JSON for ``root_path``, or ``None``."""
         data = self.get_bytes(f"{REGISTRY_PREFIX}{root_path}{REGISTRY_SUFFIX}")
         if data is None:
             return None
         return json.loads(data)
-
-    def put_registry(self, root_path: str, data: dict[str, Any]) -> None:
-        """Store ``data`` as the registry JSON for ``root_path``."""
-        payload = json.dumps(data).encode("utf-8")
-        self.put_bytes(
-            f"{REGISTRY_PREFIX}{root_path}{REGISTRY_SUFFIX}",
-            payload,
-            content_type="application/json",
-        )

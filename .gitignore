@@ -25,6 +25,10 @@ charm/uv.lock
 __pycache__/
 .pytest_cache/
 
+# Local Django control-plane artifacts (PostgreSQL is used in deployments)
+*.sqlite3
+staticfiles/
+
 # Sphinx build output
 docs/_build/
 

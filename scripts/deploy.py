@@ -11,9 +11,14 @@ Subcommands (``all`` runs setup -> build -> deploy):
 * ``deploy``: create the ``doc-hosting`` model, deploy MinIO (S3 storage
   backend) and the s3-integrator charm (which provides the ``s3`` interface
   to the doc-hosting-api charm, configured with the MinIO endpoint and
-  credentials), deploy the doc-hosting-api charm, integrate everything,
-  configure the publish token, wait for the applications to become active
-  and write the connection details to ``.juju-deploy.env``.
+  credentials), deploy PostgreSQL (postgresql-k8s, providing the
+  ``postgresql`` interface for the control-plane database), deploy the
+  doc-hosting-api charm, integrate everything, configure the publish token,
+  wait for the applications to become active and write the connection
+  details (including the docs project's generated shared secret and the
+  admin console URL) to ``.juju-deploy.env``. No admin account is created
+  automatically: create it manually with ``manage.py createsuperuser``
+  inside the running unit.
 * ``teardown``: destroy the model (add ``--controller`` to also destroy the
   Juju controller).
 
@@ -49,6 +54,8 @@ MINIO = "minio"
 MINIO_CHANNEL = "latest/edge"
 S3_INTEGRATOR = "s3-integrator"
 S3_INTEGRATOR_CHANNEL = "2/stable"
+POSTGRESQL = "postgresql-k8s"
+POSTGRESQL_CHANNEL = "14/stable"
 BUCKET = "doc-hosting"
 MINIO_PORT = 9000
 IMAGE_REPOSITORY = "localhost:32000/doc-hosting-api"
@@ -639,6 +646,27 @@ def publish_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def env_file_value(name: str) -> str | None:
+    """Return a value recorded in the env file, if any."""
+    if not ENV_FILE.exists():
+        return None
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{name}="):
+            value = line.partition("=")[2].strip()
+            if value:
+                return value
+    return None
+
+
+def project_secret() -> str:
+    """Return the docs project's shared secret, generating one on first use.
+
+    The secret is claimed by the first authenticated publication of the
+    ``docs`` root path and must be presented by every later publication.
+    """
+    return env_file_value("PROJECT_SECRET") or secrets.token_urlsafe(24)
+
+
 def wait_for_apps(apps: list[str]) -> None:
     """Poll `juju status` until all apps are active (or fail loudly)."""
     deadline = time.monotonic() + WAIT_TIMEOUT
@@ -763,6 +791,22 @@ def ensure_integrated() -> None:
     )
 
 
+def ensure_postgres_integrated() -> None:
+    """Integrate doc-hosting-api:postgresql with postgresql-k8s, tolerating existing relations."""
+    result = run(
+        ["juju", "integrate", "-m", MODEL, f"{APP}:postgresql", f"{POSTGRESQL}:database"],
+        check=False,
+        capture_output=True,
+    )
+    output = (result.stdout + result.stderr).lower()
+    if result.returncode == 0 or "already" in output:
+        return
+    raise DeployError(
+        f"could not integrate {APP}:postgresql with {POSTGRESQL}:database: "
+        f"{result.stderr or result.stdout}"
+    )
+
+
 def configure_s3_integrator(access_key: str, secret_key: str) -> None:
     """Deploy and configure s3-integrator with the MinIO endpoint and credentials.
 
@@ -848,6 +892,21 @@ def deploy() -> None:
     else:
         print(f"{S3_INTEGRATOR}: already deployed")
 
+    if POSTGRESQL not in apps:
+        run(
+            [
+                "juju",
+                "deploy",
+                "-m",
+                MODEL,
+                POSTGRESQL,
+                "--channel",
+                POSTGRESQL_CHANNEL,
+            ]
+        )
+    else:
+        print(f"{POSTGRESQL}: already deployed")
+
     if APP not in apps:
         charm = find_newest("doc-hosting-api_*.charm", REPO_ROOT / "charm")
         run(
@@ -866,11 +925,12 @@ def deploy() -> None:
         print(f"{APP}: already deployed")
 
     ensure_integrated()
+    ensure_postgres_integrated()
 
     token = publish_token()
     run(["juju", "config", "-m", MODEL, APP, f"publish-token={token}"])
 
-    wait_for_apps([MINIO, S3_INTEGRATOR, APP])
+    wait_for_apps([MINIO, S3_INTEGRATOR, POSTGRESQL, APP])
 
     status = juju_status()
     api_address = app_address(status, APP)
@@ -887,11 +947,15 @@ def deploy() -> None:
     relation_secret_key = relation_data.get("secret-key") or secret_key
     bucket = ensure_bucket(endpoint, relation_access_key, relation_secret_key, bucket)
 
+    secret = project_secret()
+    admin_url = f"{api_url}/manage/"
     ENV_FILE.write_text(
         "\n".join(
             [
                 f"API_URL={api_url}",
                 f"API_TOKEN={token}",
+                f"PROJECT_SECRET={secret}",
+                f"ADMIN_URL={admin_url}",
                 f"S3_ENDPOINT={endpoint}",
                 f"S3_ACCESS_KEY={relation_access_key}",
                 f"S3_SECRET_KEY={relation_secret_key}",
@@ -912,6 +976,18 @@ def deploy() -> None:
         "--build-dir docs/_build/dirhtml"
     )
     print(f"  curl {api_url}/docs/en/latest/")
+    print(f"  admin console: {admin_url}")
+    print("    no admin account is created automatically; create one manually")
+    print(f"    inside the running unit: juju ssh -m {MODEL} {APP}/0")
+    print("    then (with the application's environment, e.g. APP_SECRET_KEY and")
+    print("    POSTGRESQL_DB_CONNECT_STRING): python3 /app/manage.py createsuperuser")
+    print(
+        "\nThe PROJECT_SECRET recorded in the env file is the shared secret for "
+        "the docs project; later publications of the same root path must present "
+        "it, and nested root paths (e.g. 'docs/guides') may be claimed with it. "
+        "API_TOKEN is the deployment-wide publish token sent as the bearer "
+        "header; PROJECT_SECRET is only ever sent inside the request body."
+    )
     print(
         "\nIf the ClusterIP addresses above are not reachable from your machine, "
         f"use port forwarding instead, e.g.:\n"

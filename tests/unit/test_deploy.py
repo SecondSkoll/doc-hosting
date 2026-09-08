@@ -263,3 +263,21 @@ def test_teardown_recovers_unregistered_controller_only_when_explicit(monkeypatc
 
     deploy.teardown(True)
     assert deleted == [True]
+
+
+def test_project_secret_is_reused_from_env_file(monkeypatch, tmp_path):
+    env_file = tmp_path / ".juju-deploy.env"
+    monkeypatch.setattr(deploy, "ENV_FILE", env_file)
+    env_file.write_text("PROJECT_SECRET=stored-secret\n", encoding="utf-8")
+
+    assert deploy.project_secret() == "stored-secret"
+
+
+def test_project_secret_is_generated_and_stable(monkeypatch, tmp_path):
+    env_file = tmp_path / ".juju-deploy.env"
+    monkeypatch.setattr(deploy, "ENV_FILE", env_file)
+
+    first = deploy.project_secret()
+    assert first
+    env_file.write_text(f"PROJECT_SECRET={first}\n", encoding="utf-8")
+    assert deploy.project_secret() == first

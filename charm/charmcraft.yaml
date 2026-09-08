@@ -25,8 +25,9 @@ description: |
   an authenticated ingestion API to register documentation builds, a version
   API listing the registered versions and languages, and middleware that
   serves the built documentation straight from an S3-compatible bucket
-  (MinIO). Registry metadata is stored as JSON objects under the reserved
-  _registry/ prefix in the same bucket.
+  (MinIO). The PostgreSQL control plane (via the postgresql integration)
+  holds the projects, publications, redirects, migrations and audit history,
+  and a staff-only Django admin console is served at /manage/.
 
 extensions:
   - fastapi-framework
@@ -37,6 +38,14 @@ config:
       type: string
       optional: false
       description: Bearer token required by the ingestion (publish) API; exposed to the application as the APP_PUBLISH_TOKEN environment variable.
+    allowed-hosts:
+      type: string
+      optional: true
+      description: Comma-separated list of hosts the /manage/ console may be served from (Django ALLOWED_HOSTS); exposed to the application as the APP_ALLOWED_HOSTS environment variable. When unset, no host is trusted outside development/test mode.
+    csrf-trusted-origins:
+      type: string
+      optional: true
+      description: Comma-separated list of trusted origins (e.g. https://docs.example.com) for CSRF validation of the /manage/ console behind an ingress; exposed to the application as the APP_CSRF_TRUSTED_ORIGINS environment variable.
 
 # Integrations used by this application.
 # Integrations set to "optional: false" will block the charm
@@ -44,6 +53,10 @@ config:
 requires:
   s3:
     interface: s3
+    optional: false
+    limit: 1
+  postgresql:
+    interface: postgresql_client
     optional: false
     limit: 1
 

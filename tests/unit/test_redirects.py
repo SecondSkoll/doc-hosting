@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import register_build
 
 from doc_hosting.registry import models, services
 
@@ -94,14 +95,7 @@ def test_registered_root_shadow_is_rejected(redirect_ready):
     # An unrelated prefix that does not capture the root is fine.
     create("/doc", "/docs", match_type=models.Redirect.MATCH_PREFIX)
     # A prefix capturing a nested registered root is rejected too.
-    services.publish_build(
-        root_path="docs/guides",
-        language="en",
-        version="latest",
-        commit_hash="x",
-        domain="d",
-        project_secret="project-secret",
-    )
+    register_build(root_path="docs/guides")
     with pytest.raises(services.ServiceError) as excinfo:
         create("/docs/guides", "/elsewhere", match_type=models.Redirect.MATCH_PREFIX)
     assert excinfo.value.status_code == 409

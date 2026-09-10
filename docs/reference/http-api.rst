@@ -18,14 +18,14 @@ Both direct-upload endpoints require these independent credentials:
   secret after the root is claimed.
 
 The bearer token is a deployment-wide gate. The project secret establishes
-root ownership; only its salted hash is stored. The begin endpoint uses the
-same nested-root ownership and disabled-dimension rules as the legacy publish
-endpoint.
+root ownership; only its salted hash is stored. The begin endpoint enforces
+the `Root paths and ownership`_ rules and the project's disabled-dimension
+rules before creating a session.
 
 ``POST /api/v1/uploads``
 ------------------------
 
-Begins the preferred direct-upload flow and returns HTTP 201. The request body
+Begins the direct-upload flow and returns HTTP 201. The request body
 contains:
 
 .. code-block:: json
@@ -84,6 +84,22 @@ the file bytes to ``url`` with every returned ``headers`` entry unchanged.
 Presigned URLs are temporary credentials and should not be logged or shared.
 The URLs and a pending upload session expire after ``url_ttl`` seconds.
 
+Root paths and ownership
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A URL-safe segment begins with an alphanumeric character and then contains
+only alphanumeric characters, dots, underscores, or hyphens. ``.`` and ``..``
+are invalid. Root paths are trimmed, lowercased, stripped of leading/trailing
+slashes, and have repeated slashes collapsed. Their first segment cannot be
+``api``, ``manage``, ``health``, or ``_registry``.
+
+Ownership uses segment boundaries. For example, ``project-1`` does not own
+``project-10``. The first fully authenticated upload claims an unclaimed
+root. A new nested root such as ``project-1/guides`` requires a secret
+matching an existing ancestor. A new parent that would shadow an existing
+descendant is rejected. If legacy import created an unclaimed project, its
+first fully authenticated upload adopts the supplied secret.
+
 ``POST /api/v1/uploads/{upload_id}/finalize``
 ------------------------------------------------
 
@@ -107,7 +123,9 @@ The API re-authenticates the project, rejects an expired session or changed
 manifest, rechecks the project's current language/version dimensions, and
 verifies that every object exists with the declared size and SHA-256. It then
 atomically upserts the publication, marks the session completed, and records
-audit events. A verification failure leaves the session pending and does not
+audit events. A repeat publication for the same project, language, and
+version replaces the existing publication row and appends another audit
+event. A verification failure leaves the session pending and does not
 register a publication; it can be retried until expiry.
 
 First completion returns HTTP 201 with:
@@ -141,79 +159,6 @@ Direct-upload errors
 * 422: invalid request fields, paths, checksums, sizes, or an empty manifest or
   project secret.
 * 503: the publish token or required server-side S3 settings are unavailable.
-
-``POST /api/v1/publish`` (legacy register-only)
-------------------------------------------------
-
-Upserts the current publication for a project, language, and version and
-returns HTTP 201. It does not upload or verify objects. It remains available
-for callers that arrange storage separately; new publishers should use the
-direct-upload flow.
-
-Authentication
-~~~~~~~~~~~~~~
-
-Both credentials are mandatory:
-
-* ``Authorization: Bearer <token>`` must match ``APP_PUBLISH_TOKEN``.
-* ``project_secret`` in the JSON body must be non-empty and must match the
-  project secret after the root is claimed.
-
-Request fields
-~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-
-   * - Field
-     - Type
-     - Constraint
-   * - ``commit_hash``
-     - string
-     - Required.
-   * - ``version``
-     - string
-     - Required URL-safe segment.
-   * - ``language``
-     - string
-     - Required URL-safe segment.
-   * - ``domain``
-     - string
-     - Required; replaces the project's current domain when changed.
-   * - ``root_path``
-     - string
-     - Required normalized project root; may contain multiple segments.
-   * - ``project_secret``
-     - string
-     - Required and non-empty.
-
-A URL-safe segment begins with an alphanumeric character and then contains
-only alphanumeric characters, dots, underscores, or hyphens. ``.`` and ``..``
-are invalid. Root paths are trimmed, lowercased, stripped of leading/trailing
-slashes, and have repeated slashes collapsed. Their first segment cannot be
-``api``, ``manage``, ``health``, or ``_registry``.
-
-Ownership uses segment boundaries. For example, ``project-1`` does not own
-``project-10``. A new nested root such as ``project-1/guides`` requires a
-secret matching an existing ancestor. A new parent that would shadow an
-existing descendant is rejected. If legacy import created an unclaimed
-project, its first fully authenticated publication adopts the supplied secret.
-
-The response contains ``root_path``, ``domain``, ``language``, ``version``,
-``commit_hash``, ``registered_at`` (ISO 8601), and boolean ``claimed``. A
-repeat publication replaces the existing publication row for the same
-project/language/version pair and creates another audit event.
-
-Errors
-~~~~~~
-
-* 401, with ``WWW-Authenticate: Bearer``: missing or malformed authorization.
-* 403: wrong bearer token, wrong project secret, or a nested claim with no
-  matching ancestor secret.
-* 409: a claim shadows an existing descendant, a concurrent claim won, or a
-  language/version conflicts with a disabled dimension's sole label.
-* 422: invalid fields, root path, language, version, or empty project secret.
-* 503: the bearer token or required S3 settings are unavailable.
 
 ``GET /api/v1/versions``
 ------------------------

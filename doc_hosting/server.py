@@ -6,15 +6,14 @@ migrations and the immutable audit history.  The application still serves
 built documentation straight from the S3 bucket, with object keys mirroring
 the URL paths under the project root according to its active layout.
 
-Every publish requires two independent credentials: the deployment-wide
+Every publication requires two independent credentials: the deployment-wide
 bearer token (``Authorization: Bearer <APP_PUBLISH_TOKEN>``) as the
 deployment gate, and a non-empty ``project_secret`` in the JSON body as the
 per-root ownership proof.  Only the project secret is hashed and stored.
-Two publish flows share those gates: the register-only ``POST
-/api/v1/publish`` (for callers that uploaded content themselves) and the
-direct-upload flow ``POST /api/v1/uploads`` -> presigned exact-key PUT URLs
--> ``POST /api/v1/uploads/{upload_id}/finalize`` (the API verifies the
-uploaded objects' checksums and atomically registers the build).
+Publications are registered through the direct-upload flow ``POST
+/api/v1/uploads`` -> presigned exact-key PUT URLs -> ``POST
+/api/v1/uploads/{upload_id}/finalize`` (the API verifies the uploaded
+objects' checksums and atomically registers the build).
 
 Routes are registered so that the platform endpoints win: ``/health``,
 ``/api/v1/*``, the Django admin mounted at ``/manage/``, and finally one
@@ -42,21 +41,6 @@ from .settings import Settings, SettingsError, get_settings
 from .storage import S3Storage
 
 SLUG_RE = paths.SLUG_RE
-
-
-class PublishRequest(BaseModel):
-    """Request body for the ingestion (publish) API."""
-
-    commit_hash: str
-    version: str
-    language: str
-    domain: str
-    root_path: str
-    # Per-root ownership proof; validated only after the deployment bearer
-    # gate has passed. Kept out of the required schema so a missing secret
-    # reports 422 for an otherwise authenticated request (and a missing
-    # bearer still reports 401).
-    project_secret: str | None = None
 
 
 class UploadManifestEntry(BaseModel):
@@ -222,35 +206,6 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         """Liveness endpoint (no configuration required)."""
         return {"status": "ok"}
-
-    @app.post("/api/v1/publish", status_code=201)
-    def publish(body: PublishRequest, request: Request) -> dict[str, Any]:
-        """Ingestion API: upsert a documentation build in the control plane.
-
-        Two independent credentials are required: the deployment-wide
-        bearer token (``Authorization: Bearer <APP_PUBLISH_TOKEN>``) and
-        the project's shared secret in the JSON body. Only the project
-        secret is ever hashed and stored; the bearer token is a deployment
-        gate and never becomes project state.
-        """
-        bearer = _require_bearer(request)
-        _require_publish_token(request, bearer)
-        _validate_slug(body.language, "language")
-        _validate_slug(body.version, "version")
-        project_secret = _require_project_secret(body.project_secret)
-        try:
-            return services.publish_build(
-                root_path=body.root_path,
-                language=body.language,
-                version=body.version,
-                commit_hash=body.commit_hash,
-                domain=body.domain,
-                project_secret=project_secret,
-            )
-        except services.ServiceError as exc:
-            raise HTTPException(
-                status_code=exc.status_code, detail=exc.detail
-            ) from exc
 
     @app.post("/api/v1/uploads", status_code=201)
     def begin_upload(body: UploadBeginRequest, request: Request) -> dict[str, Any]:

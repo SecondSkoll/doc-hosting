@@ -3,7 +3,7 @@
 All metadata mutations go through this module (the API handlers and the
 Django admin are thin adapters), so the rules live in exactly one place:
 
-* Ownership: every publish carries two independent credentials, both
+* Ownership: every publication carries two independent credentials, both
   already checked by the API layer: the deployment-wide bearer token
   (``Authorization: Bearer <APP_PUBLISH_TOKEN>``) and the project's shared
   secret in the JSON body. Only the project secret is hashed and stored.
@@ -15,15 +15,15 @@ Django admin are thin adapters), so the rules live in exactly one place:
   concurrent bypass (SQLite tests rely on its single-writer model).
 * Publications are upserted per (project, language, version) and audited on
   every push.
-* Direct uploads share the same authorization and registration rules: the
-  API ``begin`` step claims/authenticates the root and issues short-lived
-  exact-key presigned PUT URLs (one per declared manifest file, each bound
-  to the file's SHA-256); the ``finalize`` step re-authenticates, locks the
-  session, verifies every object's existence, size and stored SHA-256 in
-  storage and only then transactionally registers the publication and
-  completes the session. Failures leave the session pending (retryable
-  until it expires) and nothing registered; replaying a completed session
-  with an identical manifest is idempotent.
+* Direct uploads own the publication flow: the API ``begin`` step
+  claims/authenticates the root and issues short-lived exact-key presigned
+  PUT URLs (one per declared manifest file, each bound to the file's
+  SHA-256); the ``finalize`` step re-authenticates, locks the session,
+  verifies every object's existence, size and stored SHA-256 in storage and
+  only then transactionally registers the publication and completes the
+  session. Failures leave the session pending (retryable until it expires)
+  and nothing registered; replaying a completed session with an identical
+  manifest is idempotent.
 * Redirects are same-site absolute paths only, matched exact-first and then
   by longest prefix with suffix preservation, loop/hop protections, reserved
   namespace and registered-root-shadow protections, a resolution cache with
@@ -199,71 +199,6 @@ def _register_publication(
     return publication
 
 
-def publish_build(
-    *,
-    root_path: str,
-    language: str,
-    version: str,
-    commit_hash: str,
-    domain: str | None,
-    project_secret: str,
-) -> dict[str, Any]:
-    """Upsert a publication, claiming the root on the first publication.
-
-    The caller (the ingestion API) has already passed both gates: the
-    deployment-wide bearer token and the presence of a non-empty project
-    secret in the request body. Only the project secret is hashed/stored.
-
-    Raises:
-        ServiceError: 422 for an empty secret or unsafe paths, 403 for
-            secret mismatches on the project or a foreign ancestor, 409 when
-            the claim would shadow an existing descendant, was raced by a
-            concurrent claim, or violates a disabled dimension's sole label.
-    """
-    if not project_secret or not project_secret.strip():
-        raise ServiceError(422, "project_secret must not be empty")
-    try:
-        root = paths.normalize_root_path(root_path)
-    except paths.InvalidPathError as exc:
-        raise ServiceError(422, str(exc)) from exc
-    with transaction.atomic():
-        project, claimed, secret_adopted = _resolve_project_for_publication(
-            root, project_secret
-        )
-        _assert_publication_dimensions(project, language, version)
-        _apply_publication_domain(project, domain)
-        publication = _register_publication(project, language, version, commit_hash)
-        if claimed:
-            record_audit(
-                project,
-                "project.claimed",
-                {
-                    "root_path": root,
-                    "domain": project.domain,
-                    "secret_adopted": secret_adopted,
-                },
-            )
-        record_audit(
-            project,
-            "publication.upserted",
-            {
-                "language": language,
-                "version": version,
-                "commit_hash": commit_hash,
-                "domain": project.domain,
-            },
-        )
-    return {
-        "root_path": root,
-        "domain": project.domain,
-        "language": language,
-        "version": version,
-        "commit_hash": commit_hash,
-        "registered_at": publication.registered_at.isoformat(),
-        "claimed": claimed,
-    }
-
-
 def _claim_root(*, root: str, project_secret: str) -> None:
     """Create the project row for an unclaimed root, enforcing ownership.
 
@@ -391,15 +326,18 @@ def begin_upload(
 ) -> dict[str, Any]:
     """Authorize a direct upload and create its (pending) upload session.
 
-    Shares the publish authorization rules (root claim, project secret,
-    disabled dimensions), stores the declared manifest on the session and
-    returns one short-lived exact-key presigned PUT URL per manifest file,
-    each bound to the file's SHA-256 so the storage rejects a mismatching
-    body at PUT time.
+    Enforces the publication authorization rules (root claim, project
+    secret, disabled dimensions), stores the declared manifest on the
+    session and returns one short-lived exact-key presigned PUT URL per
+    manifest file, each bound to the file's SHA-256 so the storage rejects
+    a mismatching body at PUT time.
 
     Raises:
         ServiceError: 422 for an empty secret, unsafe paths or an invalid
-            manifest; 403/409 with the ownership rules of publish_build.
+            manifest; 403 for a secret mismatch on the project or a
+            foreign ancestor; 409 when the claim would shadow an existing
+            descendant, was raced by a concurrent claim, or violates a
+            disabled dimension's sole label.
     """
     if not project_secret or not project_secret.strip():
         raise ServiceError(422, "project_secret must not be empty")
@@ -576,8 +514,8 @@ def finalize_upload(
                 raise ServiceError(403, "invalid project secret for this root path")
         else:
             # Unreachable through the API (begin claims or adopts the
-            # secret); kept for parity with publish_build so finalize can
-            # never authenticate against an unclaimed project.
+            # secret); kept so finalize can never authenticate against an
+            # unclaimed project.
             project.set_secret(project_secret)
             project.save(update_fields=["secret_hash", "updated_at"])
         if session.status == models.UploadSession.STATUS_COMPLETED:

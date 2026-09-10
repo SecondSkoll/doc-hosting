@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import register_build
 from django.contrib.auth import get_user_model
 from django.test import Client
 
@@ -25,14 +26,7 @@ def staff_client(superuser):
 
 @pytest.fixture()
 def claimed_project(clean_db):
-    services.publish_build(
-        root_path="docs",
-        language="en",
-        version="latest",
-        commit_hash="deadbeef",
-        domain="docs.example.com",
-        project_secret="project-secret",
-    )
+    register_build(project_secret="project-secret")
     return models.Project.objects.get(root_path="docs")
 
 

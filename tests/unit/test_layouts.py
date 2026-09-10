@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import register_build
 
 from doc_hosting.registry import models, services
 
@@ -11,14 +12,7 @@ pytestmark = pytest.mark.usefixtures("aws")
 
 def claimed(root="docs", secret="project-secret"):
     """Claim a root path directly through the services."""
-    services.publish_build(
-        root_path=root,
-        language="en",
-        version="latest",
-        commit_hash="deadbeef",
-        domain="docs.example.com",
-        project_secret=secret,
-    )
+    register_build(root_path=root, project_secret=secret)
     return models.Project.objects.get(root_path=root)
 
 
@@ -131,22 +125,8 @@ class TestToggleRekeying:
         assert excinfo.value.status_code == 409
 
     def test_disable_dimension_with_ambiguous_labels_conflicts(self, storage):
-        services.publish_build(
-            root_path="docs",
-            language="en",
-            version="latest",
-            commit_hash="a",
-            domain="d",
-            project_secret="project-secret",
-        )
-        services.publish_build(
-            root_path="docs",
-            language="fr",
-            version="latest",
-            commit_hash="b",
-            domain="d",
-            project_secret="project-secret",
-        )
+        register_build(language="en", commit_hash="a", domain="d")
+        register_build(language="fr", commit_hash="b", domain="d")
         project = models.Project.objects.get(root_path="docs")
         with pytest.raises(services.ServiceError) as excinfo:
             services.toggle_project_layout(
@@ -681,14 +661,7 @@ class TestEnableMembershipProof:
         # Reviewer example: version-only layout, sole published version
         # 'latest'; an arbitrary object inside the publication prefix is
         # structurally indistinguishable from real content.
-        services.publish_build(
-            root_path="d",
-            language="en",
-            version="latest",
-            commit_hash="deadbeef",
-            domain="docs.example.com",
-            project_secret="project-secret",
-        )
+        register_build(root_path="d")
         project = models.Project.objects.get(root_path="d")
         storage.put_bytes("d/en/latest/index.html", b"index")
         services.toggle_project_layout(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from conftest import register_build
 
 from doc_hosting.registry import models, services
 
@@ -10,14 +11,7 @@ pytestmark = pytest.mark.usefixtures("aws")
 
 
 def claimed(root="docs", secret="project-secret"):
-    services.publish_build(
-        root_path=root,
-        language="en",
-        version="latest",
-        commit_hash="deadbeef",
-        domain="docs.example.com",
-        project_secret=secret,
-    )
+    register_build(root_path=root, project_secret=secret)
     return models.Project.objects.get(root_path=root)
 
 
@@ -55,14 +49,7 @@ class TestMigrationBoundaryChecks:
     def test_old_root_with_nested_project_conflicts(self, storage):
         claimed("outer", secret="outer-secret")
         project = models.Project.objects.get(root_path="outer")
-        services.publish_build(
-            root_path="outer/inner",
-            language="en",
-            version="latest",
-            commit_hash="x",
-            domain="d",
-            project_secret="outer-secret",
-        )
+        register_build(root_path="outer/inner", project_secret="outer-secret")
         with pytest.raises(services.ServiceError) as excinfo:
             services.create_root_migration(project, "somewhere-else")
         assert excinfo.value.status_code == 409
@@ -413,14 +400,7 @@ class TestMigrationGuards:
         storage.put_bytes("docs/en/latest/index.html", b"index")
         migration = services.create_root_migration(project, "newdocs")
         # The destination was claimed by another project after the request.
-        services.publish_build(
-            root_path="newdocs",
-            language="en",
-            version="latest",
-            commit_hash="x",
-            domain="d",
-            project_secret="other-secret",
-        )
+        register_build(root_path="newdocs", project_secret="other-secret")
         with pytest.raises(services.ServiceError) as excinfo:
             services.run_root_migration(migration, storage)
         assert excinfo.value.status_code == 409

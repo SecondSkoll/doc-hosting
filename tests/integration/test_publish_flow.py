@@ -126,7 +126,7 @@ def test_integration_publish_and_serve(
 
     # Publishes without the deployment bearer are rejected with 401.
     response = httpx.post(
-        f"{base_url}/api/v1/publish",
+        f"{base_url}/api/v1/uploads",
         json={
             "commit_hash": "deadbeef",
             "version": "latest",
@@ -141,7 +141,12 @@ def test_integration_publish_and_serve(
 
 
 def test_integration_publish_checks_both_credentials(connection: dict[str, str]):
-    """Both gates are enforced independently: bearer and project secret."""
+    """Both gates are enforced independently: bearer and project secret.
+
+    Depends on the ``docs`` root already being claimed with the connection's
+    project secret by ``test_integration_publish_and_serve`` (module order):
+    a begin against an unclaimed root would claim it instead of failing.
+    """
     base_url = connection["api_url"]
     body = {
         "commit_hash": "deadbeef",
@@ -153,17 +158,29 @@ def test_integration_publish_checks_both_credentials(connection: dict[str, str])
 
     # A wrong bearer with the correct project secret is rejected (403).
     response = httpx.post(
-        f"{base_url}/api/v1/publish",
+        f"{base_url}/api/v1/uploads",
         json={**body, "project_secret": connection["project_secret"]},
         headers={"Authorization": "Bearer wrong-api-token"},
         timeout=60,
     )
     assert response.status_code == 403
 
-    # A valid bearer with a wrong project secret is rejected (403).
+    # A valid bearer with a wrong project secret is rejected (403). The
+    # probe carries a valid manifest so it passes manifest validation and
+    # reaches the project-secret check instead of failing with 422.
     response = httpx.post(
-        f"{base_url}/api/v1/publish",
-        json={**body, "project_secret": "wrong-project-secret"},
+        f"{base_url}/api/v1/uploads",
+        json={
+            **body,
+            "project_secret": "wrong-project-secret",
+            "manifest": [
+                {
+                    "path": "index.html",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "size": 1,
+                }
+            ],
+        },
         headers={"Authorization": f"Bearer {connection['api_token']}"},
         timeout=60,
     )
@@ -171,12 +188,37 @@ def test_integration_publish_checks_both_credentials(connection: dict[str, str])
 
     # A valid bearer without a project secret is rejected (422).
     response = httpx.post(
-        f"{base_url}/api/v1/publish",
+        f"{base_url}/api/v1/uploads",
         json=body,
         headers={"Authorization": f"Bearer {connection['api_token']}"},
         timeout=60,
     )
     assert response.status_code == 422
+
+
+def test_integration_removed_publish_endpoint_returns_method_not_allowed(
+    connection: dict[str, str],
+):
+    """The register-only publish endpoint is gone.
+
+    A fully credentialed ``POST /api/v1/publish`` no longer reaches any
+    ingestion handler: only the GET catch-all serving route matches the
+    path, so the request fails with 405.
+    """
+    response = httpx.post(
+        f"{connection['api_url']}/api/v1/publish",
+        json={
+            "commit_hash": "deadbeef",
+            "version": "latest",
+            "language": "en",
+            "domain": "localhost",
+            "root_path": "docs",
+            "project_secret": connection["project_secret"],
+        },
+        headers={"Authorization": f"Bearer {connection['api_token']}"},
+        timeout=60,
+    )
+    assert response.status_code == 405
 
 
 def test_integration_nested_root_publish_and_serve(

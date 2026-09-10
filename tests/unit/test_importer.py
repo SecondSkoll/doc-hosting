@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from conftest import TOKEN
+from conftest import begin_upload, finalize_upload, manifest_for
 
 from doc_hosting.registry import importer, models, services
 
@@ -162,57 +162,41 @@ def test_import_reports_invalid_language_and_version_labels(aws):
     assert set(models.Publication.objects.values_list("version", flat=True)) == {"fine"}
 
 
-def test_imported_project_adopts_the_first_secret(client, aws):
+def test_imported_project_adopts_the_first_secret(client, aws, storage):
     put_registry(aws, "docs", legacy_registry("d", []))
     importer.import_legacy_registry(_storage_from_env())
 
     # The imported project has no secret yet: the first fully authenticated
-    # publication (valid bearer token + project secret) claims one.
-    response = client.post(
-        "/api/v1/publish",
-        json={
-            "commit_hash": "deadbeef",
-            "version": "latest",
-            "language": "en",
-            "domain": "docs.example.com",
-            "root_path": "docs",
-            "project_secret": "my-secret",
-        },
-        headers={"Authorization": f"Bearer {TOKEN}"},
-    )
+    # upload (valid bearer token + project secret) adopts one.
+    files = {"index.html": b"<html>index</html>"}
+    response = begin_upload(client, manifest_for(files), project_secret="my-secret")
     assert response.status_code == 201
-    assert response.json()["claimed"] is True
     project = models.Project.objects.get(root_path="docs")
     assert project.check_secret("my-secret")
+    adoption = models.AuditEvent.objects.get(event_type="project.claimed")
+    assert adoption.payload["secret_adopted"] is True
+
+    # Completing the upload registers the imported project's publication.
+    begun = response.json()
+    storage.put_bytes(f"{begun['key_prefix']}/index.html", files["index.html"])
+    response = finalize_upload(
+        client, begun["upload_id"], manifest_for(files), project_secret="my-secret"
+    )
+    assert response.status_code == 201
+    assert models.Publication.objects.filter(
+        project=project, language="en", version="latest"
+    ).exists()
 
     # The adoption happens only after the deployment gate passed: a wrong
     # bearer cannot claim, even with a valid-looking secret.
-    response = client.post(
-        "/api/v1/publish",
-        json={
-            "commit_hash": "deadbeef",
-            "version": "latest",
-            "language": "en",
-            "domain": "docs.example.com",
-            "root_path": "docs",
-            "project_secret": "other",
-        },
-        headers={"Authorization": "Bearer wrong-token"},
+    response = begin_upload(
+        client, manifest_for(files), credential="wrong-token", project_secret="other"
     )
     assert response.status_code == 403
 
     # A different secret is now rejected.
-    response = client.post(
-        "/api/v1/publish",
-        json={
-            "commit_hash": "deadbeef",
-            "version": "latest",
-            "language": "en",
-            "domain": "docs.example.com",
-            "root_path": "docs",
-            "project_secret": "other-secret",
-        },
-        headers={"Authorization": f"Bearer {TOKEN}"},
+    response = begin_upload(
+        client, manifest_for(files), project_secret="other-secret"
     )
     assert response.status_code == 403
 

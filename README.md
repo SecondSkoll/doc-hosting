@@ -20,6 +20,10 @@ The Juju deployment contains `doc-hosting-api`, `postgresql-k8s`, MinIO, and
 `s3-integrator`. PostgreSQL is the metadata source of truth; S3 contains only
 published files and any pre-migration `_registry/` JSON.
 
+See [Deployment design](DESIGN.md) for the detailed architecture, data flows,
+security boundaries, operational model, limitations, and provider-neutral
+production recommendations.
+
 Implemented behavior includes:
 
 - dual publish authentication: the global bearer token and a per-project

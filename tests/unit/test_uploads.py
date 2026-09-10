@@ -8,7 +8,14 @@ import urllib.parse as urlparse
 from datetime import datetime, timedelta
 
 import pytest
-from conftest import SECRET, TOKEN, begin_upload, finalize_upload, manifest_for
+from conftest import (
+    SECRET,
+    TOKEN,
+    begin_upload,
+    finalize_upload,
+    manifest_for,
+    register_build,
+)
 from django.utils import timezone
 
 from doc_hosting.registry import models, services
@@ -198,6 +205,9 @@ class TestBeginAuthorizationAndClaim:
 
         project = models.Project.objects.get(root_path="project-1/docs")
         assert project.secret_claimed
+        # Only a salted hash of the project secret is stored.
+        assert project.secret_hash.startswith("pbkdf2_sha256$")
+        assert "project-secret" not in project.secret_hash
         assert project.check_secret(SECRET)
         assert not project.check_secret("wrong-secret")
 
@@ -236,16 +246,19 @@ class TestBeginAuthorizationAndClaim:
         assert response.status_code == 409
         assert not models.Project.objects.filter(root_path="project-1").exists()
 
+    def test_unrelated_segment_prefix_roots_do_not_shadow(self, client):
+        # Ownership works on segment boundaries: ``project-1`` neither owns
+        # nor shadows ``project-10``.
+        assert begin_upload(client, root_path="project-1").status_code == 201
+        response = begin_upload(
+            client, project_secret="other-secret", root_path="project-10"
+        )
+        assert response.status_code == 201
+        assert models.Project.objects.filter(root_path="project-10").exists()
+
     def test_begin_while_dimension_disabled_conflicts(self, client, storage):
         files = {"index.html": b"<html>"}
-        services.publish_build(
-            root_path="docs",
-            language="en",
-            version="latest",
-            commit_hash="deadbeef",
-            domain="docs.example.com",
-            project_secret=SECRET,
-        )
+        register_build()
         project = models.Project.objects.get(root_path="docs")
         services.toggle_project_layout(
             project, language_enabled=False, version_enabled=True, storage=storage
@@ -328,14 +341,7 @@ class TestPresignedUploads:
         )
 
     def test_key_prefix_respects_disabled_dimensions(self, client, storage):
-        services.publish_build(
-            root_path="docs",
-            language="en",
-            version="latest",
-            commit_hash="deadbeef",
-            domain="docs.example.com",
-            project_secret=SECRET,
-        )
+        register_build()
         project = models.Project.objects.get(root_path="docs")
         services.toggle_project_layout(
             project, language_enabled=True, version_enabled=False, storage=storage
@@ -431,14 +437,7 @@ class TestFinalizeHappyPath:
         assert client.get("/docs/en/latest/usage/").status_code == 200
 
     def test_finalize_upserts_an_existing_publication(self, client, storage):
-        services.publish_build(
-            root_path="docs",
-            language="en",
-            version="latest",
-            commit_hash="old-hash",
-            domain="docs.example.com",
-            project_secret=SECRET,
-        )
+        register_build(commit_hash="old-hash")
         files = {"index.html": b"<html>"}
         begun = begin_upload(
             client, manifest_for(files), commit_hash="new-hash"
@@ -448,6 +447,37 @@ class TestFinalizeHappyPath:
         assert response.status_code == 201
         publication = models.Publication.objects.get()
         assert publication.commit_hash == "new-hash"
+
+    def test_every_push_upserts_one_row_and_audits_every_push(
+        self, client, storage
+    ):
+        files = {"index.html": b"<html>"}
+
+        def push(commit_hash, **overrides):
+            begun = begin_upload(
+                client, manifest_for(files), commit_hash=commit_hash, **overrides
+            ).json()
+            _upload_objects(storage, begun["key_prefix"], files)
+            response = finalize_upload(client, begun["upload_id"], manifest_for(files))
+            assert response.status_code == 201
+
+        push("hash-1")
+        push("hash-2")
+        project = models.Project.objects.get(root_path="docs")
+        publications = project.publications.all()
+        assert publications.count() == 1
+        assert publications.first().commit_hash == "hash-2"
+
+        push("hash-fr", language="fr")
+        assert project.publications.count() == 2
+
+        upserts = models.AuditEvent.objects.filter(event_type="publication.upserted")
+        assert upserts.count() == 3
+        claims = models.AuditEvent.objects.filter(event_type="project.claimed")
+        assert claims.count() == 1
+        for event in models.AuditEvent.objects.all():
+            assert "project-secret" not in str(event.payload)
+            assert "global-token" not in str(event.payload)
 
     def test_finalize_applies_the_session_domain(self, client, storage):
         files = {"index.html": b"<html>"}

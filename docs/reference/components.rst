@@ -5,7 +5,7 @@ Application
 -----------
 
 ``app.py`` exposes the FastAPI application. It provides health, direct-upload,
-legacy publish, and version endpoints, mounts Django admin at ``/manage/``,
+and version endpoints, mounts Django admin at ``/manage/``,
 resolves redirects, and serves content from S3. Django ORM services hold
 control-plane rules and apply migrations at process startup; PostgreSQL
 migration runs are serialized with an advisory lock.

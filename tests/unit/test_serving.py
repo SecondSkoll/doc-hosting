@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import publish
+from conftest import register_build
 
 from doc_hosting.registry import models, services
 
@@ -11,7 +11,7 @@ pytestmark = pytest.mark.usefixtures("client")
 
 
 def test_serving_default_layout(client, aws):
-    publish(client)
+    register_build()
     aws.put_object(
         Bucket="test-bucket",
         Key="docs/en/latest/index.html",
@@ -54,20 +54,20 @@ def test_serving_default_layout(client, aws):
 
 
 def test_partial_dimension_paths_are_not_served(client):
-    publish(client)
+    register_build()
     assert client.get("/docs/en").status_code == 404
     assert client.get("/docs/en/").status_code == 404
     assert client.get("/docs").status_code == 404
 
 
 def test_unclaimed_paths_return_404(client):
-    publish(client)
+    register_build()
     assert client.get("/unknown/en/latest/").status_code == 404
     assert client.get("/api/v1/unknown").status_code == 404
 
 
 def test_nested_root_serves(client, aws):
-    publish(client, root_path="Project-1//Docs/")
+    register_build(root_path="Project-1//Docs/")
     aws.put_object(
         Bucket="test-bucket",
         Key="project-1/docs/en/latest/index.html",
@@ -82,8 +82,8 @@ def test_nested_root_serves(client, aws):
 
 
 def test_longest_registered_root_wins(client, aws):
-    publish(client, root_path="docs")
-    publish(client, root_path="docs/guides")
+    register_build(root_path="docs")
+    register_build(root_path="docs/guides")
     aws.put_object(
         Bucket="test-bucket", Key="docs/en/latest/index.html", Body=b"outer"
     )
@@ -95,7 +95,7 @@ def test_longest_registered_root_wins(client, aws):
 
 
 def test_case_insensitive_root_matching_preserves_doc_case(client, aws):
-    publish(client)
+    register_build()
     aws.put_object(
         Bucket="test-bucket", Key="docs/en/latest/File.HTML", Body=b"cased"
     )
@@ -105,7 +105,7 @@ def test_case_insensitive_root_matching_preserves_doc_case(client, aws):
 
 
 def test_layout_root_only_serves_at_the_root(client, storage):
-    publish(client)
+    register_build()
     # Content under the old layout: layout redirect pairs are derived from
     # actually mapped keys, so the toggle needs content to re-key.
     storage.put_bytes("docs/en/latest/index.html", b"root index")
@@ -129,7 +129,7 @@ def test_layout_root_only_serves_at_the_root(client, storage):
 
 
 def test_public_404_does_not_leak_the_internal_s3_key(client, aws):
-    publish(client)
+    register_build()
     aws.put_object(
         Bucket="test-bucket", Key="docs/en/latest/index.html", Body=b"index"
     )

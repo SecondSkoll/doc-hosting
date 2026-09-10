@@ -1,10 +1,9 @@
-"""Unit tests for the publish API: the two-gate credential model and ownership."""
+"""Unit tests for the application routes: health, versions and availability."""
 
 from __future__ import annotations
 
 import pytest
-from conftest import SECRET, TOKEN, publish, publish_as
-from fastapi.testclient import TestClient
+from conftest import SECRET, TOKEN, ManifestStorage, manifest_for, register_build
 
 from doc_hosting.registry import models
 
@@ -17,190 +16,36 @@ def test_health(client):
     assert response.json() == {"status": "ok"}
 
 
-def test_publish_requires_well_formed_bearer_credentials(client):
-    body = {
-        "commit_hash": "deadbeef",
-        "version": "latest",
-        "language": "en",
-        "domain": "docs.example.com",
-        "root_path": "docs",
-        "project_secret": SECRET,
-    }
-    assert client.post("/api/v1/publish", json=body).status_code == 401
-    assert (
-        client.post(
-            "/api/v1/publish", json=body, headers={"Authorization": "Basic abc"}
-        ).status_code
-        == 401
-    )
-    assert (
-        client.post(
-            "/api/v1/publish", json=body, headers={"Authorization": "Bearer"}
-        ).status_code
-        == 401
-    )
-    # 401 wins over the body gates: the deployment gate is checked first.
-    assert publish_as(client, credential=None, project_secret=None).status_code == 401
+def test_removed_publish_endpoint_returns_method_not_allowed(client):
+    """The register-only publish endpoint is gone.
 
-
-def test_wrong_bearer_with_correct_project_secret_is_rejected(client):
-    response = publish_as(client, credential="wrong-token")
-    assert response.status_code == 403
-    assert "wrong-token" not in response.text
-    assert not models.Project.objects.exists()
-
-
-def test_valid_bearer_with_wrong_project_secret_is_rejected(client):
-    publish(client)
-    response = publish_as(client, project_secret="wrong-secret")
-    assert response.status_code == 403
-    assert "wrong-secret" not in response.text
-    # The bearer token never doubles as a project secret.
-    response = publish_as(client, project_secret=TOKEN)
-    assert response.status_code == 403
-
-
-def test_missing_or_empty_project_secret_is_rejected(client):
-    # Missing key, empty value and whitespace all fail with 422, and the
-    # error never echoes what was sent.
-    response = publish_as(client, project_secret=None)
-    assert response.status_code == 422
-    response = publish_as(client, project_secret="")
-    assert response.status_code == 422
-    response = publish_as(client, project_secret="   ")
-    assert response.status_code == 422
-    assert "project-secret" not in response.text
-    # Nothing was claimed.
-    assert not models.Project.objects.exists()
-
-
-def test_publish_rejected_when_global_token_unconfigured(monkeypatch, aws):
-    from doc_hosting.server import create_app
-
-    monkeypatch.delenv("APP_PUBLISH_TOKEN")
-    bare_client = TestClient(create_app())
-    response = publish(bare_client)
-    assert response.status_code == 503
-    assert not models.Project.objects.exists()
-
-
-def test_first_publication_claims_the_root(client):
-    response = publish(client, root_path="  Project-1//Docs ")
-    assert response.status_code == 201
-    entry = response.json()
-    assert entry["root_path"] == "project-1/docs"
-    assert entry["claimed"] is True
-    assert entry["commit_hash"] == "deadbeef"
-    assert entry["registered_at"]
-    # No secret material (either credential) is ever echoed back.
-    assert "project-secret" not in response.text
-    assert "global-token" not in response.text
-
-    project = models.Project.objects.get(root_path="project-1/docs")
-    assert project.secret_claimed
-    assert "project-secret" not in project.secret_hash
-    assert project.secret_hash.startswith("pbkdf2_sha256$")
-    assert project.check_secret("project-secret")
-    assert not project.check_secret("wrong-secret")
-    # The deployment bearer token is not stored as the project secret.
-    assert not project.check_secret(TOKEN)
-    assert project.domain == "docs.example.com"
-
-
-def test_republish_requires_the_same_secret(client):
-    assert publish(client).status_code == 201
-    # The same secret may publish again.
-    assert publish(client, commit_hash="cafebabe").status_code == 201
-    # A different secret is rejected with 403.
-    response = publish_as(client, project_secret="wrong-secret")
-    assert response.status_code == 403
-    assert "wrong-secret" not in response.text
-
-
-def test_republish_upserts_one_row_and_audits_every_push(client):
-    publish(client, commit_hash="hash-1")
-    publish(client, commit_hash="hash-2")
-    project = models.Project.objects.get(root_path="docs")
-    publications = project.publications.all()
-    assert publications.count() == 1
-    assert publications.first().commit_hash == "hash-2"
-
-    publish(client, language="fr", commit_hash="hash-fr")
-    assert project.publications.count() == 2
-
-    upserts = models.AuditEvent.objects.filter(event_type="publication.upserted")
-    assert upserts.count() == 3
-    claims = models.AuditEvent.objects.filter(event_type="project.claimed")
-    assert claims.count() == 1
-    for event in models.AuditEvent.objects.all():
-        assert "project-secret" not in str(event.payload)
-        assert "global-token" not in str(event.payload)
-
-
-def test_matching_secret_may_claim_a_nested_root(client):
-    publish(client, root_path="project-1")
-    response = publish(client, root_path="project-1/docs")
-    assert response.status_code == 201
-    assert models.Project.objects.filter(root_path="project-1/docs").exists()
-
-
-def test_foreign_ancestor_secret_is_rejected(client):
-    publish(client, root_path="project-1")
-    response = publish_as(client, project_secret="attacker-secret", root_path="project-1/evil")
-    assert response.status_code == 403
-    assert not models.Project.objects.filter(root_path="project-1/evil").exists()
-
-
-def test_claiming_a_prefix_that_shadows_a_descendant_conflicts(client):
-    publish(client, root_path="project-1/docs")
-    response = publish_as(client, project_secret="some-other-secret", root_path="project-1")
-    assert response.status_code == 409
-    assert not models.Project.objects.filter(root_path="project-1").exists()
-
-
-def test_project_1_and_project_10_are_unrelated(client):
-    publish(client, root_path="project-1")
-    response = publish_as(client, project_secret="other-secret", root_path="project-10")
-    assert response.status_code == 201
-    assert models.Project.objects.filter(root_path="project-10").exists()
-
-
-def test_publish_rejects_unsafe_paths(client):
-    for field, value in [
-        ("root_path", "../etc"),
-        ("root_path", ""),
-        ("root_path", ".."),
-        ("root_path", "docs/../etc"),
-        ("root_path", "api"),
-        ("root_path", "manage"),
-        ("root_path", "health"),
-        ("root_path", "_registry"),
-        ("language", ".."),
-        ("language", "en/../../etc"),
-        ("version", "1..0/../x"),
-    ]:
-        response = publish(client, **{field: value})
-        assert response.status_code == 422, (field, value)
-
-    # Multi-segment roots are now valid (nested roots), but still validated.
-    assert publish(client, root_path="docs/guides").status_code == 201
-
-    # Missing required fields are rejected by the schema.
+    A fully credentialed ``POST /api/v1/publish`` no longer reaches any
+    ingestion handler: only the GET catch-all serving route matches the
+    path, so the request fails with 405 and nothing is claimed.
+    """
     response = client.post(
         "/api/v1/publish",
-        json={"commit_hash": "deadbeef"},
+        json={
+            "commit_hash": "deadbeef",
+            "version": "latest",
+            "language": "en",
+            "domain": "docs.example.com",
+            "root_path": "docs",
+            "project_secret": SECRET,
+        },
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
-    assert response.status_code == 422
+    assert response.status_code == 405
+    assert not models.Project.objects.exists()
 
 
 def test_versions_api(client):
     response = client.get("/api/v1/versions", params={"root_path": "unknown"})
     assert response.status_code == 404
 
-    publish(client, commit_hash="hash-en-latest")
-    publish(client, language="fr", commit_hash="hash-fr-latest")
-    publish(client, version="1.0", commit_hash="hash-en-1.0")
+    register_build(commit_hash="hash-en-latest")
+    register_build(language="fr", commit_hash="hash-fr-latest")
+    register_build(version="1.0", commit_hash="hash-en-1.0")
 
     response = client.get("/api/v1/versions", params={"root_path": "DOCS/"})
     assert response.status_code == 200
@@ -231,26 +76,6 @@ def test_versions_api(client):
     assert client.get("/api/v1/versions", params={"root_path": ".."}).status_code == 422
 
 
-def test_publish_while_dimension_disabled_conflicts(client, storage):
-    from doc_hosting.registry import services
-
-    publish(client)
-    project = models.Project.objects.get(root_path="docs")
-    services.toggle_project_layout(
-        project, language_enabled=False, version_enabled=True, storage=storage
-    )
-    assert publish(client, language="fr").status_code == 409
-    assert publish(client, language="en").status_code == 201
-    assert publish(client, version="1.0").status_code == 201
-
-
-def test_domain_updates_on_publish(client):
-    publish(client, domain="first.example.com")
-    publish(client, domain="second.example.com")
-    project = models.Project.objects.get(root_path="docs")
-    assert project.domain == "second.example.com"
-
-
 def test_concurrent_claims_are_serialized(client):
     """Concurrent boundary claims cannot interleave check and insert.
 
@@ -275,13 +100,16 @@ def test_concurrent_claims_are_serialized(client):
     def claim(root: str, secret: str) -> None:
         barrier.wait()
         try:
-            services.publish_build(
+            services.begin_upload(
                 root_path=root,
                 language="en",
                 version="latest",
                 commit_hash="x",
                 domain="d",
                 project_secret=secret,
+                manifest=manifest_for({"index.html": b"<html>"}),
+                storage=ManifestStorage({"index.html": b"<html>"}),
+                url_ttl=900,
             )
             outcomes.append(("created", root))
         except services.ServiceError as exc:

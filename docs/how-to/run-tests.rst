@@ -43,5 +43,5 @@ charm, then checks publish and serve behavior. To reuse existing artifacts,
 set ``CHARM_FILE`` and ``APP_IMAGE`` in the environment before running it.
 
 The latest local review did not run this suite or the rock/charm builds because
-the sandbox lacked usable snapd/Juju. It ran 273 unit tests successfully; one
-PostgreSQL-only concurrency test was skipped under SQLite (274 collected).
+the sandbox lacked usable snapd/Juju. It ran 261 unit tests successfully; one
+PostgreSQL-only concurrency test was skipped under SQLite (262 collected).

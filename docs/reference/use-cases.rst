@@ -79,29 +79,6 @@ Supported failure and replay branches are:
 * A finalize replay with an identical manifest returns 200 and ``replay: true``.
 * A finalize replay with a differing manifest returns 409.
 
-Legacy register-only publication
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The legacy endpoint applies the same credential, root-ownership, and dimension
-gates, but the caller arranges storage separately. It neither uploads nor
-verifies objects; a successful publication upsert returns 201.
-
-.. mermaid::
-   :alt: Legacy register-only publication sequence showing credential validation, root and dimension checks, and the publication upsert.
-
-   sequenceDiagram
-       accTitle: Legacy register-only publication
-       accDescr: The caller authenticates, the API applies root and dimension rules, and the control plane registers the publication without uploading or verifying objects.
-       participant Caller
-       participant API as doc-hosting-api
-       participant DB as PostgreSQL control plane
-       Caller->>API: POST /api/v1/publish<br/>bearer token and project_secret
-       API->>API: Validate request and both credentials
-       API->>DB: Resolve or claim root and assert dimensions
-       API->>DB: Atomic publication upsert and audit
-       API-->>Caller: 201 publication record
-       Note over Caller,DB: No object upload or verification
-
 Consumption
 -----------
 

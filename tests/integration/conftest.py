@@ -35,6 +35,8 @@ POSTGRESQL_CHANNEL = "14/stable"
 BUCKET = "doc-hosting"
 TOKEN = "integration-token"
 PROJECT_SECRET = "integration-project-secret"
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "integration-admin-password"
 MINIO_ACCESS_KEY = "doc-hosting-int"
 MINIO_SECRET_KEY = "integration-secret-key"
 APP_IMAGE = "localhost:32000/doc-hosting-api:0.1"
@@ -135,9 +137,16 @@ def deployment(juju: jubilant.Juju, built_artifacts: tuple[pathlib.Path, str]):
     juju.deploy(charm_file, APP, resources={"app-image": app_image})
     juju.integrate(f"{APP}:s3", f"{S3_INTEGRATOR}:s3-credentials")
     juju.integrate(f"{APP}:postgresql", f"{POSTGRESQL}:database")
-    # Only the publish token is configured; the admin superuser is never
-    # created automatically (manual `manage.py createsuperuser`).
-    juju.config(APP, {"publish-token": TOKEN})
+    # The publish token and the admin credentials are plain config values;
+    # the application provisions the admin superuser from them at startup.
+    juju.config(
+        APP,
+        {
+            "publish-token": TOKEN,
+            "admin-username": ADMIN_USERNAME,
+            "admin-password": ADMIN_PASSWORD,
+        },
+    )
 
     juju.wait(
         lambda status: (
@@ -196,6 +205,8 @@ def connection(juju: jubilant.Juju, deployment) -> dict[str, str]:
         "api_token": TOKEN,
         "project_secret": PROJECT_SECRET,
         "admin_url": f"{api_url}/manage/",
+        "admin_username": ADMIN_USERNAME,
+        "admin_password": ADMIN_PASSWORD,
         "s3_endpoint": minio_endpoint,
         "s3_access_key": access_key,
         "s3_secret_key": secret_key,

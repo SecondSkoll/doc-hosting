@@ -46,6 +46,16 @@ config:
       type: string
       optional: true
       description: Comma-separated list of trusted origins (e.g. https://docs.example.com) for CSRF validation of the /manage/ console behind an ingress; exposed to the application as the APP_CSRF_TRUSTED_ORIGINS environment variable.
+    admin-username:
+      type: string
+      optional: true
+      default: admin
+      description: Username of the Django admin superuser created automatically at application startup; exposed to the application as the APP_ADMIN_USERNAME environment variable.
+    admin-password:
+      type: string
+      optional: true
+      default: admin
+      description: Initial password of the Django admin superuser created automatically at application startup; exposed to the application as the APP_ADMIN_PASSWORD environment variable. A plain config value visible to authorized Juju operators; change it via the admin interface after first login.
 
 # Integrations used by this application.
 # Integrations set to "optional: false" will block the charm

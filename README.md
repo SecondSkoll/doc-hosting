@@ -52,12 +52,15 @@ uv run scripts/publish.py --env-file .juju-deploy.env \
 The deploy script creates a PostgreSQL integration and writes
 `.juju-deploy.env`, including `API_URL`, `ADMIN_URL`, `API_TOKEN`,
 `PROJECT_SECRET`, and S3 settings. The file is ignored by Git but contains
-credentials: restrict access and delete it when no longer needed. No admin
-password is provisioned automatically; create a superuser manually before
-using `/manage/`.
+credentials: restrict access and delete it when no longer needed. The admin
+superuser is created automatically at startup with the default credentials
+`admin`/`admin`. Override them with the `admin-username` and `admin-password`
+charm options on the initial deployment, and change the password in the admin
+interface after first login. No action, SSH session, or management command is
+required.
 
 See [Deploy the proof of concept locally](docs/how-to/deploy-the-poc-locally.rst)
-for deployment, PostgreSQL, and superuser steps.
+for deployment, PostgreSQL, and admin sign-in steps.
 
 ## Publish credentials
 
@@ -104,5 +107,10 @@ uv run --group docs sphinx-build --fail-on-warning --keep-going \
   logged or shared.
 - The charm's `publish-token` is a plain configuration string visible to
   authorized Juju operators. Use access controls appropriate to that risk.
+- The charm's `admin-password` is a plain configuration string visible to
+  authorized Juju operators, and its default (`admin`) is public knowledge.
+  It is only authoritative until the first login: change the password in the
+  admin interface immediately, after which the config value no longer
+  affects the account.
 - SQLite is only a local/test fallback. Use PostgreSQL for deployment and for
   concurrency guarantees.

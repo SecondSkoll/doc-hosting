@@ -45,6 +45,9 @@ def env(monkeypatch):
     monkeypatch.delenv("S3_ENDPOINT", raising=False)
     monkeypatch.delenv("S3_PATH", raising=False)
     monkeypatch.delenv("S3_REGION", raising=False)
+    monkeypatch.delenv("APP_ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("APP_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("APP_ADMIN_EMAIL", raising=False)
     monkeypatch.delenv("DOC_HOSTING_REDIRECT_CACHE_TTL", raising=False)
     monkeypatch.delenv("DOC_HOSTING_UPLOAD_URL_TTL", raising=False)
 

@@ -16,9 +16,10 @@ Subcommands (``all`` runs setup -> build -> deploy):
   doc-hosting-api charm, integrate everything, configure the publish token,
   wait for the applications to become active and write the connection
   details (including the docs project's generated shared secret and the
-  admin console URL) to ``.juju-deploy.env``. No admin account is created
-  automatically: create it manually with ``manage.py createsuperuser``
-  inside the running unit.
+  admin console URL) to ``.juju-deploy.env``. The admin superuser is
+  created automatically by the application at startup, from the
+  ``admin-username``/``admin-password`` charm config options (defaults
+  documented in the charm configuration reference).
 * ``teardown``: destroy the model (add ``--controller`` to also destroy the
   Juju controller).
 
@@ -604,6 +605,41 @@ def app_names() -> set[str]:
     return set(status.get("applications", {}).keys())
 
 
+def deploy_or_refresh_app(apps: set[str]) -> None:
+    """Deploy the API, or refresh an existing application to the latest build."""
+    charm = find_newest("doc-hosting-api_*.charm", REPO_ROOT / "charm")
+    if APP not in apps:
+        run(
+            [
+                "juju",
+                "deploy",
+                "-m",
+                MODEL,
+                str(charm),
+                APP,
+                "--resource",
+                f"app-image={APP_IMAGE}",
+            ]
+        )
+        return
+
+    # `build` pushes a replacement image to APP_IMAGE. Explicitly refresh the
+    # resource so rerunning `all` does not leave the unit on an older image.
+    run(
+        [
+            "juju",
+            "refresh",
+            "-m",
+            MODEL,
+            APP,
+            "--path",
+            str(charm),
+            "--resource",
+            f"app-image={APP_IMAGE}",
+        ]
+    )
+
+
 def juju_status() -> dict[str, Any]:
     return run_json(["juju", "status", "--format=json", "-m", MODEL])
 
@@ -907,22 +943,7 @@ def deploy() -> None:
     else:
         print(f"{POSTGRESQL}: already deployed")
 
-    if APP not in apps:
-        charm = find_newest("doc-hosting-api_*.charm", REPO_ROOT / "charm")
-        run(
-            [
-                "juju",
-                "deploy",
-                "-m",
-                MODEL,
-                str(charm),
-                APP,
-                "--resource",
-                f"app-image={APP_IMAGE}",
-            ]
-        )
-    else:
-        print(f"{APP}: already deployed")
+    deploy_or_refresh_app(apps)
 
     ensure_integrated()
     ensure_postgres_integrated()
@@ -977,10 +998,9 @@ def deploy() -> None:
     )
     print(f"  curl {api_url}/docs/en/latest/")
     print(f"  admin console: {admin_url}")
-    print("    no admin account is created automatically; create one manually")
-    print(f"    inside the running unit: juju ssh -m {MODEL} {APP}/0")
-    print("    then (with the application's environment, e.g. APP_SECRET_KEY and")
-    print("    POSTGRESQL_DB_CONNECT_STRING): python3 /app/manage.py createsuperuser")
+    print("    sign in with the admin-username/admin-password charm config")
+    print("    (default credentials: admin / admin)")
+    print("    change the password via the admin interface after first login")
     print(
         "\nThe PROJECT_SECRET recorded in the env file is the shared secret for "
         "the docs project; later publications of the same root path must present "

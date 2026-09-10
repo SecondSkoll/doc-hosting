@@ -65,6 +65,7 @@ extensions = [
     "sphinx_last_updated_by_git",
     "sphinx.ext.intersphinx",
     "sphinx_sitemap",
+    "sphinxcontrib.mermaid"
 ]
 exclude_patterns = ["_build", "_dev", ".venv*"]
 rst_prolog = """

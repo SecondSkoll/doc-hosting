@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 
 import httpx
@@ -214,3 +215,34 @@ def test_integration_admin_is_staff_only(connection: dict[str, str]):
     )
     assert response.status_code == 302
     assert "/manage/login" in response.headers["location"]
+
+
+def test_integration_admin_login_with_configured_credentials(connection: dict[str, str]):
+    """The charm-configured superuser can sign in to the admin console."""
+    admin_url = connection["admin_url"]
+    with httpx.Client(timeout=60) as client:
+        # GET the login page first: the session cookie and the form's CSRF
+        # token are both required by the POST.
+        login_page = client.get(f"{admin_url}login/")
+        assert login_page.status_code == 200
+        match = re.search(
+            r'name="csrfmiddlewaretoken" value="([^"]+)"', login_page.text
+        )
+        assert match is not None
+        response = client.post(
+            f"{admin_url}login/",
+            data={
+                "csrfmiddlewaretoken": match.group(1),
+                "username": connection["admin_username"],
+                "password": connection["admin_password"],
+                "next": "/manage/",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "/manage/login" not in response.headers["location"]
+
+        # The admin index loads for the signed-in superuser.
+        index = client.get(admin_url, follow_redirects=False)
+        assert index.status_code == 200
+        assert "Site administration" in index.text

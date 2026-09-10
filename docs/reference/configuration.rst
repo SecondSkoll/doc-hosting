@@ -19,6 +19,16 @@ Charm configuration and integrations
    * - ``csrf-trusted-origins``
      - Optional comma-separated string
      - Exposed as ``APP_CSRF_TRUSTED_ORIGINS``; origins include their scheme.
+   * - ``admin-username``
+     - Optional string; default ``admin``
+     - Exposed as ``APP_ADMIN_USERNAME``; username of the superuser created
+       automatically at application startup. Creation-only: an existing
+       user is never modified.
+   * - ``admin-password``
+     - Optional string; default ``admin``
+     - Exposed as ``APP_ADMIN_PASSWORD``; initial password of the
+       auto-created superuser. A plain config value visible to authorized
+       Juju operators; change it via the admin interface after first login.
    * - ``s3`` integration
      - Required; limit one
      - Supplies S3 settings. The charm blocks without it.
@@ -81,6 +91,15 @@ Application environment
    * - ``APP_CSRF_TRUSTED_ORIGINS``
      - Empty
      - Comma-separated trusted origins; ``CSRF_TRUSTED_ORIGINS`` is fallback.
+   * - ``APP_ADMIN_USERNAME``
+     - Optional; charm default ``admin``
+     - Username for the admin superuser provisioned at startup. Both admin
+       variables unset: no user is created. Only one set: startup fails.
+   * - ``APP_ADMIN_PASSWORD``
+     - Optional; charm default ``admin``
+     - Password for the provisioned superuser (stored only as a Django
+       hash). Creation happens once; later config changes never alter an
+       existing user's password.
    * - ``DOC_HOSTING_REDIRECT_CACHE_TTL``
      - ``30`` seconds
      - Non-negative redirect-cache lifetime; invalid values use 30 seconds.

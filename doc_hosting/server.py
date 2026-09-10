@@ -205,10 +205,10 @@ class _FullPathWSGI:
 
 def create_app() -> FastAPI:
     """Build the doc-hosting FastAPI application."""
-    # Configure Django (pending migrations are applied here too; the
-    # 12-factor charm runs `manage.py migrate` before the app starts, and
-    # the admin superuser is always created manually with
-    # `manage.py createsuperuser`).
+    # Configure Django (pending migrations are applied here too, and the
+    # bootstrap provisions the admin superuser from the charm's
+    # admin-username/admin-password config options; the 12-factor charm
+    # also runs `manage.py migrate` before the app starts).
     db.ensure_database_ready()
 
     app = FastAPI(

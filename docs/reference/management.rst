@@ -2,8 +2,11 @@ Management interface
 ====================
 
 The Django admin is mounted at ``/manage/``. Authentication is Django's
-staff-only login and mutation forms enforce CSRF protection. No superuser or
-admin password is created automatically.
+staff-only login and mutation forms enforce CSRF protection. A superuser is
+provisioned automatically at application startup from the charm's
+``admin-username``/``admin-password`` options (defaults ``admin``/``admin``).
+Change the password through the admin interface after first login;
+re-provisioning never overwrites an existing user's password.
 
 .. list-table::
    :header-rows: 1

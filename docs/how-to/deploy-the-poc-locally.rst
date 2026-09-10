@@ -1,8 +1,8 @@
 Deploy the proof of concept locally
 ===================================
 
-Deploy MinIO, PostgreSQL, and the API on local Juju/MicroK8s, create an admin
-account, publish this documentation, and verify it.
+Deploy MinIO, PostgreSQL, and the API on local Juju/MicroK8s, sign in to the
+auto-provisioned admin console, publish this documentation, and verify it.
 
 Prerequisites
 -------------
@@ -38,20 +38,34 @@ applications.
 The generated ``.juju-deploy.env`` contains credentials and endpoints,
 including ``PROJECT_SECRET`` and ``ADMIN_URL``. Restrict access to it.
 
-Create a superuser
-------------------
+Sign in to the admin console
+----------------------------
 
-No account or password is created automatically. Enter the API unit and run
-the Django command with the application's injected environment available:
+The superuser is created automatically when the application starts, from the
+charm's ``admin-username`` and ``admin-password`` options. Their defaults are
+``admin``/``admin``, so the generated ``ADMIN_URL`` is usable immediately
+after deployment. No action, SSH session, or management command is required.
+
+The deployment helper uses the defaults. If you deploy the charm directly
+instead, pass different initial credentials to the initial ``juju deploy`` so
+they are present before the application starts:
 
 .. code-block:: bash
 
-   uv run manage.py createsuperuser
+   uv run juju deploy -m doc-hosting \
+     ./charm/doc-hosting-api_amd64.charm doc-hosting-api \
+     --resource app-image=localhost:32000/doc-hosting-api:0.1 \
+     --config admin-username=ops \
+     --config admin-password=initial-password
 
-Run this from a trusted administrative environment with the deployed
-``APP_SECRET_KEY`` and ``POSTGRESQL_DB_CONNECT_STRING`` set. Do not copy their
-values into shell history. The command creates the account in the same
-PostgreSQL database used by the service.
+The password is a plain charm configuration value visible to authorized Juju
+operators. Do not use a long-lived password as the initial value.
+
+Creation happens once: later changes to these options never reset an existing
+account, so do not use ``juju config`` to rotate its password. A password
+changed in the admin interface survives restarts and redeploys. Change the
+default password after the first login via
+**/manage/ → Users → admin → change password**.
 
 Before exposing the admin through an ingress, configure the public host and
 HTTPS origin:

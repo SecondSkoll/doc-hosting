@@ -119,14 +119,75 @@ class TestAllowedHosts:
         assert django_settings._allowed_hosts() == ["*"]
 
 
-def test_ensure_database_ready_never_creates_a_superuser(django_db, monkeypatch):
-    """No superuser is ever created automatically (manual createsuperuser only)."""
+def test_ensure_admin_user_no_op_without_config(django_db, monkeypatch):
+    """Neither admin variable set: no user is created."""
     from django.contrib.auth import get_user_model
 
-    # Even with leftover admin credentials in the environment, the
-    # bootstrap creates no user.
-    monkeypatch.setenv("APP_ADMIN_USERNAME", "ops")
-    monkeypatch.setenv("APP_ADMIN_PASSWORD", "leftover-password")
-    db.ensure_database_ready()
+    monkeypatch.delenv("APP_ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("APP_ADMIN_PASSWORD", raising=False)
+    db.ensure_admin_user()
     assert get_user_model().objects.count() == 0
-    assert not get_user_model().objects.filter(username="ops").exists()
+
+
+def test_ensure_admin_user_requires_both_values(django_db, monkeypatch):
+    """Exactly one admin variable set: provisioning fails, no user created."""
+    from django.contrib.auth import get_user_model
+
+    monkeypatch.setenv("APP_ADMIN_USERNAME", "ops")
+    monkeypatch.delenv("APP_ADMIN_PASSWORD", raising=False)
+    with pytest.raises(ImproperlyConfigured, match="APP_ADMIN_PASSWORD"):
+        db.ensure_admin_user()
+    assert get_user_model().objects.count() == 0
+
+    monkeypatch.delenv("APP_ADMIN_USERNAME", raising=False)
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "secret-pass")
+    with pytest.raises(ImproperlyConfigured, match="APP_ADMIN_USERNAME"):
+        db.ensure_admin_user()
+    assert get_user_model().objects.count() == 0
+
+
+def test_ensure_admin_user_creates_superuser(django_db, monkeypatch):
+    """Both admin variables set: a superuser with the password exists."""
+    from django.contrib.auth import get_user_model
+
+    monkeypatch.setenv("APP_ADMIN_USERNAME", "ops")
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "secret-pass")
+    db.ensure_admin_user()
+    user = get_user_model().objects.get(username="ops")
+    assert user.is_staff is True
+    assert user.is_superuser is True
+    assert user.check_password("secret-pass")
+
+
+def test_ensure_admin_user_never_resets_existing_password(django_db, monkeypatch):
+    """Creation-only idempotency: an existing user's password is kept."""
+    from django.contrib.auth import get_user_model
+
+    monkeypatch.setenv("APP_ADMIN_USERNAME", "ops")
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "secret-pass")
+    db.ensure_admin_user()
+    user = get_user_model().objects.get(username="ops")
+    # Simulate a password change made through the admin interface.
+    user.set_password("changed-in-admin")
+    user.save()
+
+    db.ensure_admin_user()
+
+    user.refresh_from_db()
+    assert user.check_password("changed-in-admin")
+    assert not user.check_password("secret-pass")
+
+
+def test_ensure_database_ready_runs_admin_provisioning(django_db, monkeypatch):
+    """ensure_database_ready() provisions the superuser at startup."""
+    from django.contrib.auth import get_user_model
+
+    # ensure_database_ready() is once per process; reset the flag so the
+    # bootstrap (migrate + provisioning) runs again inside this test.
+    monkeypatch.setattr(db, "_ready", False)
+    monkeypatch.setenv("APP_ADMIN_USERNAME", "ops")
+    monkeypatch.setenv("APP_ADMIN_PASSWORD", "secret-pass")
+    db.ensure_database_ready()
+    user = get_user_model().objects.get(username="ops")
+    assert user.is_superuser is True
+    assert user.check_password("secret-pass")

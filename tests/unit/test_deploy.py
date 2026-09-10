@@ -281,3 +281,50 @@ def test_project_secret_is_generated_and_stable(monkeypatch, tmp_path):
     assert first
     env_file.write_text(f"PROJECT_SECRET={first}\n", encoding="utf-8")
     assert deploy.project_secret() == first
+
+
+def test_deploy_or_refresh_app_deploys_new_application(monkeypatch, tmp_path):
+    charm = tmp_path / "doc-hosting-api.charm"
+    charm.touch()
+    monkeypatch.setattr(deploy, "find_newest", lambda pattern, cwd: charm)
+    commands = []
+    monkeypatch.setattr(deploy, "run", lambda command, **kwargs: commands.append(command))
+
+    deploy.deploy_or_refresh_app(set())
+
+    assert commands == [
+        [
+            "juju",
+            "deploy",
+            "-m",
+            deploy.MODEL,
+            str(charm),
+            deploy.APP,
+            "--resource",
+            f"app-image={deploy.APP_IMAGE}",
+        ]
+    ]
+
+
+def test_deploy_or_refresh_app_updates_existing_resource(monkeypatch, tmp_path):
+    charm = tmp_path / "doc-hosting-api.charm"
+    charm.touch()
+    monkeypatch.setattr(deploy, "find_newest", lambda pattern, cwd: charm)
+    commands = []
+    monkeypatch.setattr(deploy, "run", lambda command, **kwargs: commands.append(command))
+
+    deploy.deploy_or_refresh_app({deploy.APP})
+
+    assert commands == [
+        [
+            "juju",
+            "refresh",
+            "-m",
+            deploy.MODEL,
+            deploy.APP,
+            "--path",
+            str(charm),
+            "--resource",
+            f"app-image={deploy.APP_IMAGE}",
+        ]
+    ]

@@ -1,8 +1,11 @@
 # Leave a blank line at the end of this file to support concatenation
 API
+accDescr
+accTitle
 ASGI
 boto3
 boolean
+booleans
 Charmcraft
 dirhtml
 doc-hosting
@@ -20,12 +23,15 @@ OpenAPI
 pa11y
 PoC
 prepended
+presign
+presigned
 pymarkdownlnt
 ReDoc
 Rockcraft
 S3
 s3-integrator
 Sphinx
+sequenceDiagram
 subtree
 usr-merge
 uv
@@ -36,3 +42,4 @@ Truthy
 untrusted
 upsert
 upserts
+uploader

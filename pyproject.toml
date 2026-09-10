@@ -40,6 +40,7 @@ docs-sphinx-stack = [
     "sphinx-sitemap~=2.9",
     "sphinx-tabs~=3.5",
     "sphinxcontrib-jquery~=4.1",
+    "sphinxcontrib-mermaid~=2.1",
     "sphinxcontrib-svg2pdfconverter[cairosvg]~=2.1",
     "sphinxext-opengraph~=0.13",
     "vale==3.13.0.0",

@@ -15,8 +15,8 @@ Complete deployment, publishing, management, recovery, and validation tasks.
 Reference
 ---------
 
-Look up HTTP behavior, configuration, components, management controls, and the
-data and storage model.
+Look up use-case sequences, HTTP behavior, configuration, components,
+management controls, and the data and storage model.
 
 :doc:`Go to the reference <reference/index>`
 
